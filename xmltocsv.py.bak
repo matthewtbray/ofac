@@ -1,0 +1,24 @@
+import csv
+import xml.etree.ElementTree as ET
+
+# 1. Parse your XML file
+tree = ET.parse('sdn_advanced.xml')
+root = tree.getroot()
+
+# 2. Open a new flat file to write to
+with open('sdn_advanced.csv', 'w', newline='') as csv_file:
+    writer = csv.writer(csv_file)
+    
+    # 3. Write your headers (replace 'record' with your actual nested tag)
+    headers = ['id', 'name', 'value'] 
+    writer.writerow(headers)
+    
+    # 4. Extract data and write to flat file
+    for row in root.findall('record'):
+        row_data = []
+        for header in headers:
+            element = row.find(header)
+            row_data.append(element.text if element is not None else '')
+        writer.writerow(row_data)
+
+print("Conversion complete!")
