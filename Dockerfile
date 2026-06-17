@@ -21,6 +21,7 @@ RUN pip install --no-cache-dir -r requirements.txt
 
 COPY download_sdn_xml.py \
      xml_import.py \
+     sdn_match.py \
      sdn_match_v2.py \
      sdn_match_v2.cfg \
      export_results.py \
