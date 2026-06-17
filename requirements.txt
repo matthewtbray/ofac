@@ -1,0 +1,7 @@
+pyodbc>=5.0
+rapidfuzz>=3.0
+duckdb>=0.10
+requests>=2.31
+azure-storage-blob>=12.19
+azure-identity>=1.15
+!requirements.txt
