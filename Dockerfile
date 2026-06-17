@@ -1,4 +1,4 @@
-FROM python:3.11-slim-bookworm
+FROM sdnmatchacr.azurecr.io/python:3.11-slim-bookworm
 
 # Install Microsoft ODBC Driver 17 for SQL Server
 # Uses gpg --dearmor (apt-key was removed in Debian 13+)
