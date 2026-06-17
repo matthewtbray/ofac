@@ -421,23 +421,36 @@ def normalize_input(rec: InputRecord, abbrev_map: dict,
 # SDN loading
 # ---------------------------------------------------------------------------
 
-def load_sdn_names(conn, strip_pat: re.Pattern) -> dict:
+def load_sdn_names(conn, strip_pat: re.Pattern, sdn_limit: int = None) -> dict:
     """
     Load sdnEntry + akaList into phonetic/direct indexes.
     Identical index structure to sdn_match.py but includes akaList rows.
     """
-    print("Loading SDN name entries (sdnEntry + akaList)...")
-
-    sdn_rows = conn.cursor().execute(
-        "SELECT uid, firstName, lastName, sdnType FROM dbo.sdnEntry"
-    ).fetchall()
-
-    aka_rows = conn.cursor().execute("""
-        SELECT e.uid, a.uid, a.firstName, a.lastName, a.category, e.sdnType
-        FROM   dbo.akaList a
-        JOIN   dbo.sdnEntry_akaList ea ON ea.akaList_uid   = a.uid
-        JOIN   dbo.sdnEntry e          ON e.uid            = ea.sdnEntry_uid
-    """).fetchall()
+    if sdn_limit:
+        print(f"Loading SDN name entries (sdnEntry + akaList) — LIMIT {sdn_limit:,} SDN entries...")
+        _uid_subq = f"SELECT TOP({sdn_limit}) uid FROM dbo.sdnEntry ORDER BY uid"
+        sdn_rows = conn.cursor().execute(
+            f"SELECT uid, firstName, lastName, sdnType FROM dbo.sdnEntry"
+            f" WHERE uid IN ({_uid_subq})"
+        ).fetchall()
+        aka_rows = conn.cursor().execute(f"""
+            SELECT e.uid, a.uid, a.firstName, a.lastName, a.category, e.sdnType
+            FROM   dbo.akaList a
+            JOIN   dbo.sdnEntry_akaList ea ON ea.akaList_uid   = a.uid
+            JOIN   dbo.sdnEntry e          ON e.uid            = ea.sdnEntry_uid
+            WHERE  e.uid IN ({_uid_subq})
+        """).fetchall()
+    else:
+        print("Loading SDN name entries (sdnEntry + akaList)...")
+        sdn_rows = conn.cursor().execute(
+            "SELECT uid, firstName, lastName, sdnType FROM dbo.sdnEntry"
+        ).fetchall()
+        aka_rows = conn.cursor().execute("""
+            SELECT e.uid, a.uid, a.firstName, a.lastName, a.category, e.sdnType
+            FROM   dbo.akaList a
+            JOIN   dbo.sdnEntry_akaList ea ON ea.akaList_uid   = a.uid
+            JOIN   dbo.sdnEntry e          ON e.uid            = ea.sdnEntry_uid
+        """).fetchall()
 
     by_ln = defaultdict(list);    by_fn = defaultdict(list)
     sdx_by_ln = defaultdict(list); sdx_by_fn = defaultdict(list)
@@ -568,7 +581,8 @@ class SdnAddress:
     country_nm:        str
 
 
-def load_sdn_addresses(conn, abbrev_map: dict, strip_pat: re.Pattern) -> tuple:
+def load_sdn_addresses(conn, abbrev_map: dict, strip_pat: re.Pattern,
+                       sdn_limit: int = None) -> tuple:
     """
     Returns (addresses: List[SdnAddress], word_index: dict).
     Loads raw SDN address values and normalizes them in Python using the same
@@ -576,15 +590,28 @@ def load_sdn_addresses(conn, abbrev_map: dict, strip_pat: re.Pattern) -> tuple:
     punct strip).  word_index: normalized word -> set of indices into addresses
     list (words > 2 chars from all normalized address + city + country fields).
     """
-    print("Loading SDN address records...")
-    rows = conn.cursor().execute("""
-        SELECT e.uid, a.uid,
-               a.address1,    a.address2,    a.address3,
-               a.city,        a.stateOrProvince, a.postalCode, a.country
-        FROM   dbo.addressList a
-        JOIN   dbo.sdnEntry_addressList ea ON ea.addressList_uid = a.uid
-        JOIN   dbo.sdnEntry e ON e.uid = ea.sdnEntry_uid
-    """).fetchall()
+    if sdn_limit:
+        print(f"Loading SDN address records — LIMIT {sdn_limit:,} SDN entries...")
+        _uid_subq = f"SELECT TOP({sdn_limit}) uid FROM dbo.sdnEntry ORDER BY uid"
+        rows = conn.cursor().execute(f"""
+            SELECT e.uid, a.uid,
+                   a.address1,    a.address2,    a.address3,
+                   a.city,        a.stateOrProvince, a.postalCode, a.country
+            FROM   dbo.addressList a
+            JOIN   dbo.sdnEntry_addressList ea ON ea.addressList_uid = a.uid
+            JOIN   dbo.sdnEntry e ON e.uid = ea.sdnEntry_uid
+            WHERE  e.uid IN ({_uid_subq})
+        """).fetchall()
+    else:
+        print("Loading SDN address records...")
+        rows = conn.cursor().execute("""
+            SELECT e.uid, a.uid,
+                   a.address1,    a.address2,    a.address3,
+                   a.city,        a.stateOrProvince, a.postalCode, a.country
+            FROM   dbo.addressList a
+            JOIN   dbo.sdnEntry_addressList ea ON ea.addressList_uid = a.uid
+            JOIN   dbo.sdnEntry e ON e.uid = ea.sdnEntry_uid
+        """).fetchall()
 
     addresses  = []
     word_index = defaultdict(set)
@@ -622,7 +649,7 @@ def load_sdn_addresses(conn, abbrev_map: dict, strip_pat: re.Pattern) -> tuple:
     return addresses, dict(word_index)
 
 
-def load_sdn_remarks(conn, strip_pat: re.Pattern) -> tuple:
+def load_sdn_remarks(conn, strip_pat: re.Pattern, sdn_limit: int = None) -> tuple:
     """
     Parse SDN remarks for 'Linked to:' name strings and phone numbers.
 
@@ -639,10 +666,18 @@ def load_sdn_remarks(conn, strip_pat: re.Pattern) -> tuple:
         phone_last7_idx : dict[str, set[int]]
             last-7 digit string -> set of uids that have a phone whose last 7 digits match
     """
-    print("Loading SDN remarks (Linked-to + Phone)...")
-    rows = conn.cursor().execute(
-        "SELECT uid, remarks FROM dbo.sdnEntry WHERE remarks IS NOT NULL"
-    ).fetchall()
+    if sdn_limit:
+        print(f"Loading SDN remarks (Linked-to + Phone) — LIMIT {sdn_limit:,} SDN entries...")
+        _uid_subq = f"SELECT TOP({sdn_limit}) uid FROM dbo.sdnEntry ORDER BY uid"
+        rows = conn.cursor().execute(
+            f"SELECT uid, remarks FROM dbo.sdnEntry"
+            f" WHERE remarks IS NOT NULL AND uid IN ({_uid_subq})"
+        ).fetchall()
+    else:
+        print("Loading SDN remarks (Linked-to + Phone)...")
+        rows = conn.cursor().execute(
+            "SELECT uid, remarks FROM dbo.sdnEntry WHERE remarks IS NOT NULL"
+        ).fetchall()
 
     linked_to_by_uid: dict = {}
     phones_by_uid:    dict = {}
@@ -3811,6 +3846,18 @@ def _conn_str(server: str, database: str) -> str:
             f"SERVER={server};DATABASE={database};Trusted_Connection=yes;")
 
 
+def _sdn_limit_type(v: str):
+    if v.upper() == 'ALL':
+        return None
+    try:
+        n = int(v)
+        if n <= 0:
+            raise argparse.ArgumentTypeError('--sdn-limit must be a positive integer or ALL')
+        return n
+    except ValueError:
+        raise argparse.ArgumentTypeError('--sdn-limit must be a positive integer or ALL')
+
+
 def main():
     ap = argparse.ArgumentParser(
         description="SDN matching v2 -- names + addresses, full-text + word-level"
@@ -3877,6 +3924,9 @@ def main():
                     help='Disable DuckDB blocked JW precompute and fall back to '
                          'the parallel-worker approach (useful for debugging or '
                          'when duckdb is unavailable).')
+    ap.add_argument('--sdn-limit',        type=_sdn_limit_type, default=None, metavar='N|ALL',
+                    help='Limit SDN records evaluated to first N entries by uid '
+                         '(e.g. --sdn-limit 500). Omit or use ALL for the full SDN list.')
     args = ap.parse_args()
 
     cfg              = load_v2_config(args.config)
@@ -3909,10 +3959,12 @@ def main():
         abbrev_map = load_abbrev_map(sdn_conn)
         print(f"  {len(abbrev_map):,} abbreviations loaded.")
 
-        name_idx = load_sdn_names(sdn_conn, strip_pat)
-        addresses, addr_word_index = load_sdn_addresses(sdn_conn, abbrev_map, strip_pat)
+        name_idx = load_sdn_names(sdn_conn, strip_pat, sdn_limit=args.sdn_limit)
+        addresses, addr_word_index = load_sdn_addresses(sdn_conn, abbrev_map, strip_pat,
+                                                        sdn_limit=args.sdn_limit)
         (linked_to_by_uid, phones_by_uid,
-         lt_word_index, phone_last7_idx) = load_sdn_remarks(sdn_conn, strip_pat)
+         lt_word_index, phone_last7_idx) = load_sdn_remarks(sdn_conn, strip_pat,
+                                                            sdn_limit=args.sdn_limit)
 
     # Load input records
     if args.input_csv:
