@@ -3982,8 +3982,18 @@ def main():
         input_records = load_input_screening(args.sdn_server, args.sdn_database,
                                              args.sdn_schema, args.screening_table,
                                              args.top_rows, args.start_row)
-        input_source  = (f"DB:{args.sdn_server}.{args.sdn_database}"
-                         f".[{args.sdn_schema}].[{args.screening_table}]")
+        # Auto-derive label from Upload_Date written by import_screening_xlsx.py
+        with pyodbc.connect(sdn_cs) as _c:
+            _row = _c.cursor().execute(
+                f"SELECT MAX(Upload_Date) FROM [{args.sdn_schema}].[{args.screening_table}]"
+            ).fetchone()
+        _as_of = _row[0] if (_row and _row[0]) else None
+        if _as_of:
+            input_source = (f"ScreeningInput as of {_as_of.strftime('%Y-%m-%d %H:%M:%S')}"
+                            f" [{args.sdn_database}]")
+        else:
+            input_source = (f"DB:{args.sdn_server}.{args.sdn_database}"
+                            f".[{args.sdn_schema}].[{args.screening_table}]")
     else:
         if not args.input_database:
             sys.exit("--input-database is required when using --input-table")
