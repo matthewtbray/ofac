@@ -18,6 +18,8 @@
 
 set -e
 
+export PYTHONPATH=/app
+
 SDN_DB="${SDN_DB:-SDN}"
 OUT_DB="${OUT_DB:-SDNReporting}"
 SDN_LIMIT="${SDN_LIMIT:-ALL}"
