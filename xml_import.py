@@ -636,8 +636,20 @@ def collect(root: ET.Element) -> dict[str, list]:
 # ---------------------------------------------------------------------------
 
 def build_conn_str(server: str, database: str) -> str:
+    import os
+    user   = os.environ.get('SQL_USER')
+    pwd    = os.environ.get('SQL_PASSWORD')
+    driver = os.environ.get('SQL_DRIVER', 'ODBC Driver 17 for SQL Server')
+    if user and pwd:
+        return (
+            f"DRIVER={{{driver}}};"
+            f"SERVER={server};"
+            f"DATABASE={database};"
+            f"UID={user};PWD={pwd};"
+            "Encrypt=yes;TrustServerCertificate=no;Connection Timeout=30;"
+        )
     return (
-        f"DRIVER={{ODBC Driver 17 for SQL Server}};"
+        f"DRIVER={{{driver}}};"
         f"SERVER={server};"
         f"DATABASE={database};"
         "Trusted_Connection=yes;"
