@@ -3927,6 +3927,9 @@ def main():
     ap.add_argument('--sdn-limit',        type=_sdn_limit_type, default=None, metavar='N|ALL',
                     help='Limit SDN records evaluated to first N entries by uid '
                          '(e.g. --sdn-limit 500). Omit or use ALL for the full SDN list.')
+    ap.add_argument('--input-source',     default=None, metavar='STR',
+                    help='Override the input_source string recorded in MatchingResults_v2_RunLog '
+                         '(e.g. "Delaware OFAC List — as of 2026-05-19 11:02:46 EST").')
     args = ap.parse_args()
 
     cfg              = load_v2_config(args.config)
@@ -3987,6 +3990,9 @@ def main():
         input_records = load_input_db(args.input_server, args.input_database,
                                       args.input_table)
         input_source  = f"DB:{args.input_server}.{args.input_database}.{args.input_table}"
+
+    if args.input_source:
+        input_source = args.input_source
 
     # Normalise all input records up front
     print("Normalising input records...")

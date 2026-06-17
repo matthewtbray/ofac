@@ -15,6 +15,8 @@
 #   OUT_DB                  Output database name       (default: SDNReporting)
 #   SDN_LIMIT               Max SDN entries: N or ALL  (default: ALL)
 #   STORAGE_CONTAINER       Blob container name        (default: sdn)
+#   INPUT_SOURCE            Free-text label recorded in MatchingResults_v2_RunLog.input_source
+#                           (e.g. "Delaware OFAC List — as of 2026-05-19 11:02:46 EST")
 
 set -e
 
@@ -65,19 +67,25 @@ python /app/xml_import.py \
 # ---- Step 3: Run SDN matching ------------------------------------------
 echo ""
 echo "[3/4] Running SDN matching (limit: $SDN_LIMIT)..."
-if [ "$SDN_LIMIT" = "ALL" ]; then
+
+_run_match() {
     python /app/sdn_match_v2.py \
         --input-screening \
         --sdn-server   "$SQL_SERVER" --sdn-database "$SDN_DB" \
         --out-server   "$SQL_SERVER" --out-database "$OUT_DB" \
-        --no-csv
+        --no-csv \
+        "$@"
+}
+
+limit_args=""
+[ "$SDN_LIMIT" != "ALL" ] && limit_args="--sdn-limit $SDN_LIMIT"
+
+if [ -n "$INPUT_SOURCE" ]; then
+    # shellcheck disable=SC2086
+    _run_match $limit_args --input-source "$INPUT_SOURCE"
 else
-    python /app/sdn_match_v2.py \
-        --input-screening \
-        --sdn-server   "$SQL_SERVER" --sdn-database "$SDN_DB" \
-        --out-server   "$SQL_SERVER" --out-database "$OUT_DB" \
-        --sdn-limit    "$SDN_LIMIT" \
-        --no-csv
+    # shellcheck disable=SC2086
+    _run_match $limit_args
 fi
 
 # ---- Step 4: Export results to blob and truncate -----------------------
