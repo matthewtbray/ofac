@@ -25,6 +25,7 @@ COPY download_sdn_xml.py \
      sdn_match_v2.py \
      sdn_match_v2.cfg \
      export_results.py \
+     import_screening_xlsx.py \
      create_report_view.sql \
      run_azure.sh \
      ./

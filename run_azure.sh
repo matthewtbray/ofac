@@ -55,16 +55,26 @@ python /app/download_sdn_xml.py \
 
 # ---- Step 2: Import SDN.XML into Azure SQL SDN database ----------------
 echo ""
-echo "[2/4] Importing SDN.XML into [$SQL_SERVER].[$SDN_DB]..."
+echo "[2/5] Importing SDN.XML into [$SQL_SERVER].[$SDN_DB]..."
 python /app/xml_import.py \
     --xml      "$SDN_XML" \
     --server   "$SQL_SERVER" \
     --database "$SDN_DB" \
     --drop
 
-# ---- Step 3: Run SDN matching ------------------------------------------
+# ---- Step 3: Import screening list from blob ----------------------------
+# Scans the blob container for the most recent Delaware OFAC List-*.xlsx.
+# Silently skips if no file is found (ScreeningInput remains unchanged).
 echo ""
-echo "[3/4] Running SDN matching (limit: $SDN_LIMIT)..."
+echo "[3/5] Importing screening list from blob (container: $STORAGE_CONTAINER)..."
+python /app/import_screening_xlsx.py \
+    --server   "$SQL_SERVER" \
+    --database "$SDN_DB" \
+    --drop
+
+# ---- Step 4: Run SDN matching ------------------------------------------
+echo ""
+echo "[4/5] Running SDN matching (limit: $SDN_LIMIT)..."
 
 _run_match() {
     python /app/sdn_match_v2.py \
@@ -80,9 +90,9 @@ limit_args=""
 # shellcheck disable=SC2086
 _run_match $limit_args
 
-# ---- Step 4: Export results to blob and truncate -----------------------
+# ---- Step 5: Export results to blob and truncate -----------------------
 echo ""
-echo "[4/4] Exporting results to blob / truncating..."
+echo "[5/5] Exporting results to blob / truncating..."
 python /app/export_results.py \
     --out-server        "$SQL_SERVER" --out-database "$OUT_DB" \
     --sdn-server        "$SQL_SERVER" --sdn-database "$SDN_DB" \
