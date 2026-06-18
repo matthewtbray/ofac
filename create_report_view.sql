@@ -1,198 +1,240 @@
 -- ============================================================
 -- MatchingResults_Report  (VIEW)
 -- Consolidates all positive match records from every
--- MatchingResults_* table into a single reporting surface.
+-- MatchingResults_* name/AKA table into a single reporting surface.
 -- Run this script once against SDNReporting.
 -- Filter by Run_ID to scope to a specific matching run.
+--
+-- Address matching is not surfaced as standalone rows.
+-- Instead, city/country context is joined from MatchingResults_Address
+-- onto each name/AKA row via Input_Record_ID + SDN_UID.
+-- The five Country_City_* columns are NULL when no qualifying
+-- address match (City_JW >= 70, Country_JW = 0 or >= 95) exists.
 -- ============================================================
 
 CREATE OR ALTER VIEW [dbo].[MatchingResults_Report] AS
 
+WITH BestAddr AS (
+    -- Best-scoring address match per (Input_Record_ID, SDN entry)
+    -- that clears the city >= 70% and country thresholds.
+    SELECT
+        Input_Record_ID,
+        SDNEntry_UID,
+        City_JaroWinklerSimilarity  AS City_JW,
+        SourceCity,
+        SDNCity,
+        SourceCountry,
+        SDNCountry
+    FROM (
+        SELECT
+            Input_Record_ID,
+            SDNEntry_UID,
+            City_JaroWinklerSimilarity,
+            SourceCity,
+            SDNCity,
+            SourceCountry,
+            SDNCountry,
+            ROW_NUMBER() OVER (
+                PARTITION BY Input_Record_ID, SDNEntry_UID
+                ORDER BY City_JaroWinklerSimilarity DESC
+            ) AS rn
+        FROM   dbo.MatchingResults_Address
+        WHERE  City_JaroWinklerSimilarity >= 70
+        AND   (Country_JaroWinklerSimilarity = 0
+               OR Country_JaroWinklerSimilarity >= 95)
+    ) x
+    WHERE rn = 1
+)
+
 -- ---- 1. Person primary-name matches ----------------------------------
--- Rows where the input person name matched an SDN individual's
--- primary (sdnEntry) name above the configured JW threshold.
 SELECT
-    Run_ID,
-    Input_Record_ID,
-    SDN_UID,
-    SDN_Publish_Date,
-    'Person_Name'                                          AS Match_Type,
+    p.Run_ID,
+    p.Input_Record_ID,
+    p.SDN_UID,
+    p.SDN_Publish_Date,
+    'Person_Name'                                              AS Match_Type,
     LTRIM(RTRIM(
-        COALESCE(SourceFN + ' ', '')
-      + COALESCE(SourceMN + ' ', '')
-      + COALESCE(SourceLN,       '')))                    AS Input_Name,
+        COALESCE(p.SourceFN + ' ', '')
+      + COALESCE(p.SourceMN + ' ', '')
+      + COALESCE(p.SourceLN,       '')))                      AS Input_Name,
     LTRIM(RTRIM(
-        COALESCE(SDNFN + ' ', '')
-      + COALESCE(SDNLN,      '')))                        AS SDN_Name,
-    FirstName_JaroWinklerSimilarity                        AS FirstName_JW,
-    LastName_JaroWinklerSimilarity                         AS LastName_JW,
-    NULL                                                   AS FullName_JW,
-    CAST(NULL AS INT)                                      AS AKA_UID,
-    CAST(NULL AS VARCHAR(50))                              AS AKA_Category,
-    CAST(NULL AS VARCHAR(500))                             AS LinkedTo_Text,
-    CAST(NULL AS VARCHAR(100))                             AS Input_Phone,
-    CAST(NULL AS VARCHAR(100))                             AS SDN_Phone,
-    SDN_Type
-FROM   dbo.MatchingResults_Person_Full
-WHERE  Personal_Name_Match = 1
+        COALESCE(p.SDNFN + ' ', '')
+      + COALESCE(p.SDNLN,      '')))                          AS SDN_Name,
+    p.FirstName_JaroWinklerSimilarity                          AS FirstName_JW,
+    p.LastName_JaroWinklerSimilarity                           AS LastName_JW,
+    NULL                                                       AS FullName_JW,
+    CAST(NULL AS INT)                                          AS AKA_UID,
+    CAST(NULL AS VARCHAR(50))                                  AS AKA_Category,
+    CAST(NULL AS VARCHAR(500))                                 AS LinkedTo_Text,
+    CAST(NULL AS VARCHAR(100))                                 AS Input_Phone,
+    CAST(NULL AS VARCHAR(100))                                 AS SDN_Phone,
+    p.SDN_Type,
+    ba.City_JW                                                 AS Country_City_Match,
+    ba.SourceCity                                              AS Input_City,
+    ba.SDNCity                                                 AS SDN_City,
+    ba.SourceCountry                                           AS Input_Country,
+    ba.SDNCountry                                              AS SDN_Country
+FROM   dbo.MatchingResults_Person_Full p
+LEFT JOIN BestAddr ba
+    ON  ba.Input_Record_ID = p.Input_Record_ID
+    AND ba.SDNEntry_UID    = p.SDN_UID
+WHERE  p.Personal_Name_Match = 1
 
 UNION ALL
 
 -- ---- 2. Person AKA matches -------------------------------------------
--- Input person name matched an alias (akaList) of an SDN individual.
 SELECT
-    Run_ID,
-    Input_Record_ID,
-    SDN_UID,
+    a.Run_ID,
+    a.Input_Record_ID,
+    a.SDN_UID,
     NULL,
     'Person_AKA',
     LTRIM(RTRIM(
-        COALESCE(SourceFN + ' ', '')
-      + COALESCE(SourceMN + ' ', '')
-      + COALESCE(SourceLN,       ''))),
+        COALESCE(a.SourceFN + ' ', '')
+      + COALESCE(a.SourceMN + ' ', '')
+      + COALESCE(a.SourceLN,       ''))),
     LTRIM(RTRIM(
-        COALESCE(SDNFN + ' ', '')
-      + COALESCE(SDNLN,      ''))),
-    FirstName_JaroWinklerSimilarity,
-    LastName_JaroWinklerSimilarity,
+        COALESCE(a.SDNFN + ' ', '')
+      + COALESCE(a.SDNLN,      ''))),
+    a.FirstName_JaroWinklerSimilarity,
+    a.LastName_JaroWinklerSimilarity,
     NULL,
-    AKA_UID,
-    AKA_Category,
+    a.AKA_UID,
+    a.AKA_Category,
     NULL,
     NULL,
     NULL,
-    CAST(NULL AS VARCHAR(50))          -- AKA table has no SDN_Type column
-FROM   dbo.MatchingResults_AKA
-WHERE  Personal_Name_Match = 1
+    CAST(NULL AS VARCHAR(50)),
+    ba.City_JW,
+    ba.SourceCity,
+    ba.SDNCity,
+    ba.SourceCountry,
+    ba.SDNCountry
+FROM   dbo.MatchingResults_AKA a
+LEFT JOIN BestAddr ba
+    ON  ba.Input_Record_ID = a.Input_Record_ID
+    AND ba.SDNEntry_UID    = a.SDN_UID
+WHERE  a.Personal_Name_Match = 1
 
 UNION ALL
 
 -- ---- 3. Org / entity primary-name matches ----------------------------
--- Input entity name matched the primary name of an SDN entity.
--- All rows in this table share at least one org-name word with the
--- SDN entry; FullName_JW reflects the full-string similarity score.
 SELECT
-    Run_ID,
-    Input_Record_ID,
-    SDN_UID,
-    SDN_Publish_Date,
+    o.Run_ID,
+    o.Input_Record_ID,
+    o.SDN_UID,
+    o.SDN_Publish_Date,
     'Org_Name',
-    SourceOrgName,
-    SDNOrgName,
+    o.SourceOrgName,
+    o.SDNOrgName,
     NULL,
     NULL,
-    FullName_JaroWinklerSimilarity,
+    o.FullName_JaroWinklerSimilarity,
     NULL,
     NULL,
     NULL,
     NULL,
     NULL,
-    SDN_Type
-FROM   dbo.MatchingResults_OrgName
-WHERE  FullName_JaroWinklerSimilarity >= 85
+    o.SDN_Type,
+    ba.City_JW,
+    ba.SourceCity,
+    ba.SDNCity,
+    ba.SourceCountry,
+    ba.SDNCountry
+FROM   dbo.MatchingResults_OrgName o
+LEFT JOIN BestAddr ba
+    ON  ba.Input_Record_ID = o.Input_Record_ID
+    AND ba.SDNEntry_UID    = o.SDN_UID
+WHERE  o.FullName_JaroWinklerSimilarity >= 85
 
 UNION ALL
 
 -- ---- 4. Org / entity AKA matches ------------------------------------
--- Input entity name matched an alias (akaList) of an SDN entity.
 SELECT
-    Run_ID,
-    Input_Record_ID,
-    SDN_UID,
-    SDN_Publish_Date,
+    oa.Run_ID,
+    oa.Input_Record_ID,
+    oa.SDN_UID,
+    oa.SDN_Publish_Date,
     'Org_AKA',
-    SourceOrgName,
-    SDNOrgName,
+    oa.SourceOrgName,
+    oa.SDNOrgName,
     NULL,
     NULL,
-    FullName_JaroWinklerSimilarity,
-    AKA_UID,
-    AKA_Category,
+    oa.FullName_JaroWinklerSimilarity,
+    oa.AKA_UID,
+    oa.AKA_Category,
     NULL,
     NULL,
     NULL,
-    SDN_Type
-FROM   dbo.MatchingResults_OrgName_AKA
-WHERE  FullName_JaroWinklerSimilarity >= 85
+    oa.SDN_Type,
+    ba.City_JW,
+    ba.SourceCity,
+    ba.SDNCity,
+    ba.SourceCountry,
+    ba.SDNCountry
+FROM   dbo.MatchingResults_OrgName_AKA oa
+LEFT JOIN BestAddr ba
+    ON  ba.Input_Record_ID = oa.Input_Record_ID
+    AND ba.SDNEntry_UID    = oa.SDN_UID
+WHERE  oa.FullName_JaroWinklerSimilarity >= 85
 
 UNION ALL
 
 -- ---- 5. Linked-to matches -------------------------------------------
--- Input name matched a "Linked to: <name>" clause in SDN remarks.
--- SDN_Name is the linked-to entity name text from the remarks field.
 SELECT
-    Run_ID,
-    Input_Record_ID,
-    SDN_UID,
-    SDN_Publish_Date,
+    lt.Run_ID,
+    lt.Input_Record_ID,
+    lt.SDN_UID,
+    lt.SDN_Publish_Date,
     'LinkedTo',
-    SourceName,
-    LinkedTo_Text,
+    lt.SourceName,
+    lt.LinkedTo_Text,
     NULL,
     NULL,
-    FullName_JaroWinklerSimilarity,
+    lt.FullName_JaroWinklerSimilarity,
     NULL,
     NULL,
-    LinkedTo_Text,
+    lt.LinkedTo_Text,
     NULL,
     NULL,
-    NULL
-FROM   dbo.MatchingResults_LinkedTo
-WHERE  FullName_JaroWinklerSimilarity >= 85
+    NULL,
+    ba.City_JW,
+    ba.SourceCity,
+    ba.SDNCity,
+    ba.SourceCountry,
+    ba.SDNCountry
+FROM   dbo.MatchingResults_LinkedTo lt
+LEFT JOIN BestAddr ba
+    ON  ba.Input_Record_ID = lt.Input_Record_ID
+    AND ba.SDNEntry_UID    = lt.SDN_UID
+WHERE  lt.FullName_JaroWinklerSimilarity >= 85
 
 UNION ALL
 
 -- ---- 6. Phone matches -----------------------------------------------
--- Input phone number shares at least the last 7 digits with an SDN
--- remarks phone number.  JW score is computed on digit strings only.
 SELECT
-    Run_ID,
-    Input_Record_ID,
-    SDN_UID,
-    SDN_Publish_Date,
+    ph.Run_ID,
+    ph.Input_Record_ID,
+    ph.SDN_UID,
+    ph.SDN_Publish_Date,
     'Phone',
-    Input_Phone_Raw,
-    SDN_Phone_Raw,
+    ph.Input_Phone_Raw,
+    ph.SDN_Phone_Raw,
     NULL,
     NULL,
-    JaroWinkler_Digits,
-    NULL,
-    NULL,
-    NULL,
-    Input_Phone_Raw,
-    SDN_Phone_Raw,
-    NULL
-FROM   dbo.MatchingResults_Phone
-
-UNION ALL
-
--- ---- 7. Address matches ---------------------------------------------
--- Input mailing address shares at least one normalized word with an
--- SDN address record.  JW scores reflect city and country similarity.
--- Input_Name / SDN_Name show the street + city + country for context.
-SELECT
-    Run_ID,
-    Input_Record_ID,
-    SDNEntry_UID                         AS SDN_UID,
-    NULL,
-    'Address',
-    LTRIM(RTRIM(
-        COALESCE(SourceAddress1 + ', ', '')
-      + COALESCE(SourceCity    + ', ', '')
-      + COALESCE(SourceCountry,         ''))),
-    LTRIM(RTRIM(
-        COALESCE(SDNAddress1 + ', ', '')
-      + COALESCE(SDNCity    + ', ', '')
-      + COALESCE(SDNCountry,         ''))),
-    NULL,
-    NULL,
-    City_JaroWinklerSimilarity,          -- primary geo score for sorting/filtering
+    ph.JaroWinkler_Digits,
     NULL,
     NULL,
     NULL,
+    ph.Input_Phone_Raw,
+    ph.SDN_Phone_Raw,
     NULL,
-    NULL,
-    NULL
-FROM   dbo.MatchingResults_Address
-WHERE  City_JaroWinklerSimilarity >= 70
-AND   (Country_JaroWinklerSimilarity = 0 OR Country_JaroWinklerSimilarity >= 95);
+    ba.City_JW,
+    ba.SourceCity,
+    ba.SDNCity,
+    ba.SourceCountry,
+    ba.SDNCountry
+FROM   dbo.MatchingResults_Phone ph
+LEFT JOIN BestAddr ba
+    ON  ba.Input_Record_ID = ph.Input_Record_ID
+    AND ba.SDNEntry_UID    = ph.SDN_UID;
