@@ -138,6 +138,7 @@ SELECT
     NULL,
     NULL
 FROM   dbo.MatchingResults_LinkedTo
+WHERE  FullName_JaroWinklerSimilarity >= 85
 
 UNION ALL
 
