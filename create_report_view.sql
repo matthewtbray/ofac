@@ -193,4 +193,5 @@ SELECT
     NULL,
     NULL
 FROM   dbo.MatchingResults_Address
-WHERE  City_JaroWinklerSimilarity >= 70;
+WHERE  City_JaroWinklerSimilarity >= 70
+AND   (Country_JaroWinklerSimilarity = 0 OR Country_JaroWinklerSimilarity >= 95);
