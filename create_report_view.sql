@@ -192,4 +192,5 @@ SELECT
     NULL,
     NULL,
     NULL
-FROM   dbo.MatchingResults_Address;
+FROM   dbo.MatchingResults_Address
+WHERE  City_JaroWinklerSimilarity >= 70;
