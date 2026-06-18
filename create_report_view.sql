@@ -39,9 +39,8 @@ WITH BestAddr AS (
                 ORDER BY City_JaroWinklerSimilarity DESC
             ) AS rn
         FROM   dbo.MatchingResults_Address
-        WHERE  City_JaroWinklerSimilarity >= 70
-        AND   (Country_JaroWinklerSimilarity = 0
-               OR Country_JaroWinklerSimilarity >= 95)
+        WHERE  City_JaroWinklerSimilarity > 70
+        AND    Country_JaroWinklerSimilarity > 70
     ) x
     WHERE rn = 1
 )
