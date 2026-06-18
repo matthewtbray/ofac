@@ -16,6 +16,7 @@
 #   SDN_LIMIT               Max SDN entries: N or ALL  (default: ALL)
 #   STORAGE_CONTAINER       Blob container name        (default: sdn)
 #   DUMMY_RECORDS           Add N synthetic SDN-hit records for QA  (default: none)
+#   WORKERS                 Parallel worker count for matching      (default: all cores)
 
 set -e
 
@@ -90,8 +91,10 @@ limit_args=""
 [ "$SDN_LIMIT" != "ALL" ] && limit_args="--sdn-limit $SDN_LIMIT"
 dummy_args=""
 [ -n "$DUMMY_RECORDS" ] && dummy_args="--dummy-records $DUMMY_RECORDS"
+worker_args=""
+[ -n "$WORKERS" ] && worker_args="--workers $WORKERS"
 # shellcheck disable=SC2086
-_run_match $limit_args $dummy_args
+_run_match $limit_args $dummy_args $worker_args
 
 # ---- Step 5: Export results to blob and truncate -----------------------
 echo ""
