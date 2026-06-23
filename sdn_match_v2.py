@@ -90,34 +90,7 @@ except ImportError:
     _DUCKDB = False
 
 
-# ---------------------------------------------------------------------------
-# Entity suffix expansion map  (shared with incremental_load.py)
-# ---------------------------------------------------------------------------
-
-ENTITY_SUFFIX_MAP = {
-    'LLC':   'Limited Liability Company',
-    'LC':    'Limited Company',
-    'INC':   'Incorporated',
-    'CORP':  'Corporation',
-    'LTD':   'Limited',
-    'LP':    'Limited Partnership',
-    'LLP':   'Limited Liability Partnership',
-    'LLLP':  'Limited Liability Limited Partnership',
-    'PC':    'Professional Corporation',
-    'PLLC':  'Professional Limited Liability Company',
-    'PA':    'Professional Association',
-    'PLC':   'Public Limited Company',
-    'CO':    'Company',
-    'ASSOC': 'Association',
-    'ASSN':  'Association',
-    'BROS':  'Brothers',
-    'INTL':  'International',
-    'NATL':  'National',
-    'MGMT':  'Management',
-    'SVCS':  'Services',
-    'SVC':   'Service',
-    'TECH':  'Technology',
-}
+# Entity type expansion pairs are stored in EntityTypeMap (SDN database) — see load_entity_type_map()
 
 STATE_ABBREV_MAP = {
     'AL': 'ALABAMA',              'AK': 'ALASKA',               'AZ': 'ARIZONA',
@@ -310,16 +283,37 @@ def expand_address_nm(raw: str, abbrev_map: dict, strip_pat: re.Pattern) -> str:
     return normalize(' '.join(out), strip_pat)
 
 
-def expand_entity_nm(raw: str, strip_pat: re.Pattern) -> str:
-    """Expand trailing entity suffix then normalize."""
+def expand_entity_nm(raw: str, strip_pat: re.Pattern,
+                     entity_map: dict = None) -> str:
+    """Expand entity type abbreviations (prefix and/or suffix) then normalize.
+
+    When entity_map is provided (loaded via load_entity_type_map), both the
+    first token (prefix) and last token (suffix) are checked for expansion.
+    For single-token names the suffix check takes priority.
+    When entity_map is None the function is a no-op expander (normalize only).
+    """
     if not raw:
         return ''
     tokens = [t for t in _WHITESPACE.split(raw.strip()) if t]
     if not tokens:
         return ''
-    last_clean = re.sub(r'\.', '', tokens[-1]).upper()
-    if last_clean in ENTITY_SUFFIX_MAP:
-        tokens[-1] = ENTITY_SUFFIX_MAP[last_clean]
+    if entity_map is not None:
+        suffix_abbr = entity_map.get('suffix_abbr', {})
+        prefix_abbr = entity_map.get('prefix_abbr', {})
+        # Check suffix (last token)
+        last_clean = re.sub(r'\.', '', tokens[-1]).upper()
+        if last_clean in suffix_abbr:
+            tokens[-1] = suffix_abbr[last_clean]
+            # Only check prefix if name has more than one token
+            if len(tokens) > 1:
+                first_clean = re.sub(r'\.', '', tokens[0]).upper()
+                if first_clean in prefix_abbr:
+                    tokens[0] = prefix_abbr[first_clean]
+        else:
+            # No suffix match — check prefix
+            first_clean = re.sub(r'\.', '', tokens[0]).upper()
+            if first_clean in prefix_abbr:
+                tokens[0] = prefix_abbr[first_clean]
     return normalize(' '.join(tokens), strip_pat)
 
 
@@ -355,6 +349,66 @@ def load_abbrev_map(conn) -> dict:
         am[k].sort(key=lambda x: x[1])
     am['#'] = [('Number', 0)]
     return dict(am)
+
+
+def load_entity_type_map(conn) -> dict:
+    """Load EntityTypeMap from the SDN database.
+
+    Returns a dict with keys:
+      'suffix_abbr'   : {ABBR -> EXPANDED} for rows where Position in (SUFFIX, BOTH)
+      'prefix_abbr'   : {ABBR -> EXPANDED} for rows where Position in (PREFIX, BOTH)
+      'suffix_phrases': sorted list of expanded forms (and abbrs) for suffix detection,
+                        longest-phrase-first
+      'prefix_phrases': sorted list of expanded forms (and abbrs) for prefix detection,
+                        longest-phrase-first
+      'canon'         : {ABBR -> EXPANDED, EXPANDED -> EXPANDED} for canonicalization
+    """
+    rows = conn.cursor().execute(
+        "SELECT UPPER(LTRIM(RTRIM(ISNULL(Abbreviation,'')))), "
+        "       UPPER(LTRIM(RTRIM(ExpandedForm))), "
+        "       Position "
+        "FROM   dbo.EntityTypeMap"
+    ).fetchall()
+
+    suffix_abbr:   dict = {}
+    prefix_abbr:   dict = {}
+    suffix_phrases_set: set = set()
+    prefix_phrases_set: set = set()
+    canon:         dict = {}
+
+    for abbr, expanded, position in rows:
+        pos = (position or '').upper().strip()
+        if abbr:
+            canon[abbr] = expanded
+        canon[expanded] = expanded
+
+        is_suffix = pos in ('SUFFIX', 'BOTH')
+        is_prefix = pos in ('PREFIX', 'BOTH')
+
+        if abbr and is_suffix:
+            suffix_abbr[abbr] = expanded
+        if abbr and is_prefix:
+            prefix_abbr[abbr] = expanded
+
+        if is_suffix:
+            suffix_phrases_set.add(expanded)
+            if abbr:
+                suffix_phrases_set.add(abbr)
+        if is_prefix:
+            prefix_phrases_set.add(expanded)
+            if abbr:
+                prefix_phrases_set.add(abbr)
+
+    suffix_phrases = sorted(suffix_phrases_set, key=lambda p: -len(p.split()))
+    prefix_phrases = sorted(prefix_phrases_set, key=lambda p: -len(p.split()))
+
+    return {
+        'suffix_abbr':   suffix_abbr,
+        'prefix_abbr':   prefix_abbr,
+        'suffix_phrases': suffix_phrases,
+        'prefix_phrases': prefix_phrases,
+        'canon':         canon,
+    }
 
 
 # ---------------------------------------------------------------------------
@@ -401,8 +455,9 @@ def _s(v) -> Optional[str]:
 
 
 def normalize_input(rec: InputRecord, abbrev_map: dict,
-                    strip_pat: re.Pattern) -> InputRecord:
-    rec.entity_name_nm  = _ph_norm_name(expand_entity_nm(_s(rec.entity_name) or '', strip_pat))
+                    strip_pat: re.Pattern,
+                    entity_map: dict = None) -> InputRecord:
+    rec.entity_name_nm  = _ph_norm_name(expand_entity_nm(_s(rec.entity_name) or '', strip_pat, entity_map))
     rec.first_name_nm   = _ph_norm_name(normalize(_s(rec.first_name)   or '', strip_pat))
     rec.middle_name_nm  = _ph_norm_name(normalize(_s(rec.middle_name)  or '', strip_pat))
     rec.last_name_nm    = _ph_norm_name(normalize(_s(rec.last_name)    or '', strip_pat))
@@ -649,7 +704,8 @@ def load_sdn_addresses(conn, abbrev_map: dict, strip_pat: re.Pattern,
     return addresses, dict(word_index)
 
 
-def load_sdn_remarks(conn, strip_pat: re.Pattern, sdn_limit: int = None) -> tuple:
+def load_sdn_remarks(conn, strip_pat: re.Pattern, sdn_limit: int = None,
+                     entity_map: dict = None) -> tuple:
     """
     Parse SDN remarks for 'Linked to:' name strings and phone numbers.
 
@@ -695,7 +751,7 @@ def load_sdn_remarks(conn, strip_pat: re.Pattern, sdn_limit: int = None) -> tupl
             if not raw:
                 continue
             nm = re.sub(r'\s+', ' ', raw.lower()).strip()
-            nm_expanded = _ph_norm_name(expand_entity_nm(raw, strip_pat))
+            nm_expanded = _ph_norm_name(expand_entity_nm(raw, strip_pat, entity_map))
             lt_list.append((i, raw, nm, nm_expanded))
             for w in nm.split():
                 if len(w) > 2:
@@ -1341,6 +1397,100 @@ END;
 """
 
 
+_DDL_ENTITY_TYPE_MAP = """
+IF OBJECT_ID(N'[{s}].[EntityTypeMap]', N'U') IS NULL
+BEGIN
+    CREATE TABLE [{s}].[EntityTypeMap] (
+        ID           INT           NOT NULL IDENTITY(1,1),
+        Abbreviation NVARCHAR(50)  NULL,
+        ExpandedForm NVARCHAR(200) NOT NULL,
+        Position     VARCHAR(6)    NOT NULL,
+        Notes        NVARCHAR(500) NULL,
+        CONSTRAINT PK_EntityTypeMap PRIMARY KEY (ID),
+        CONSTRAINT CK_EntityTypeMap_Pos CHECK (Position IN ('PREFIX','SUFFIX','BOTH'))
+    );
+END;
+IF NOT EXISTS (SELECT 1 FROM [{s}].[EntityTypeMap])
+BEGIN
+    INSERT INTO [{s}].[EntityTypeMap] (Abbreviation, ExpandedForm, Position) VALUES
+    -- US/UK/General suffix entries
+    ('LLC',  'Limited Liability Company',             'BOTH'),
+    ('LC',   'Limited Company',                       'SUFFIX'),
+    ('INC',  'Incorporated',                          'SUFFIX'),
+    ('CORP', 'Corporation',                           'SUFFIX'),
+    ('LTD',  'Limited',                               'SUFFIX'),
+    ('LP',   'Limited Partnership',                   'SUFFIX'),
+    ('LLP',  'Limited Liability Partnership',         'SUFFIX'),
+    ('LLLP', 'Limited Liability Limited Partnership', 'SUFFIX'),
+    ('PC',   'Professional Corporation',              'SUFFIX'),
+    ('PLLC', 'Professional Limited Liability Company','SUFFIX'),
+    ('PA',   'Professional Association',              'SUFFIX'),
+    ('PLC',  'Public Limited Company',                'SUFFIX'),
+    ('CO',   'Company',                               'SUFFIX'),
+    ('ASSOC','Association',                           'SUFFIX'),
+    ('ASSN', 'Association',                           'SUFFIX'),
+    ('BROS', 'Brothers',                              'SUFFIX'),
+    ('INTL', 'International',                         'SUFFIX'),
+    ('NATL', 'National',                              'SUFFIX'),
+    ('MGMT', 'Management',                            'SUFFIX'),
+    ('SVCS', 'Services',                              'SUFFIX'),
+    ('SVC',  'Service',                               'SUFFIX'),
+    ('TECH', 'Technology',                            'SUFFIX'),
+    -- International suffix entries (German/Austrian/Swiss)
+    ('GMBH', 'Gesellschaft mit Beschraenkter Haftung','SUFFIX'),
+    ('AG',   'Aktiengesellschaft',                    'SUFFIX'),
+    ('KG',   'Kommanditgesellschaft',                 'SUFFIX'),
+    ('OHG',  'Offene Handelsgesellschaft',            'SUFFIX'),
+    ('UG',   'Unternehmergesellschaft',               'SUFFIX'),
+    ('EV',   'Eingetragener Verein',                  'SUFFIX'),
+    -- French
+    ('SA',   'Societe Anonyme',                       'SUFFIX'),
+    ('SARL', 'Societe a Responsabilite Limitee',      'SUFFIX'),
+    ('SAS',  'Societe par Actions Simplifiee',        'SUFFIX'),
+    ('SNC',  'Societe en Nom Collectif',              'SUFFIX'),
+    ('SC',   'Societe Civile',                        'SUFFIX'),
+    -- Italian
+    ('SPA',  'Societa per Azioni',                    'SUFFIX'),
+    ('SRL',  'Societa a Responsabilita Limitata',     'SUFFIX'),
+    -- Spanish/Portuguese
+    ('SL',   'Sociedad Limitada',                     'SUFFIX'),
+    ('LTDA', 'Limitada',                              'SUFFIX'),
+    ('LDA',  'Limitada',                              'SUFFIX'),
+    -- Dutch/Belgian
+    ('BV',   'Besloten Vennootschap',                 'SUFFIX'),
+    ('NV',   'Naamloze Vennootschap',                 'SUFFIX'),
+    ('VOF',  'Vennootschap onder Firma',              'SUFFIX'),
+    ('CV',   'Commanditaire Vennootschap',            'SUFFIX'),
+    -- Nordic
+    ('AB',   'Aktiebolag',                            'SUFFIX'),
+    ('AS',   'Aksjeselskap',                          'SUFFIX'),
+    ('OY',   'Osakeyhtioe',                           'SUFFIX'),
+    -- Malaysian
+    ('BHD',  'Berhad',                                'SUFFIX'),
+    -- Japanese
+    ('KK',   'Kabushiki Kaisha',                      'SUFFIX'),
+    ('GK',   'Godo Kaisha',                           'SUFFIX'),
+    -- Russian/CIS (suffix entries; BOTH for those that also appear as prefix)
+    ('OAO',  'Otkrytoye Aktsionernoye Obshchestvo',  'BOTH'),
+    ('ZAO',  'Zakrytoye Aktsionernoye Obshchestvo',  'BOTH'),
+    ('OOO',  'Obshchestvo s Ogranichennoy Otvetstvennostyu', 'BOTH'),
+    ('PAO',  'Publichnoye Aktsionernoye Obshchestvo', 'BOTH'),
+    ('AO',   'Aktsionernoye Obshchestvo',             'BOTH'),
+    -- Gulf/Middle East
+    ('WLL',  'With Limited Liability',                'SUFFIX'),
+    ('BSC',  'Bahraini Shareholding Company',         'SUFFIX'),
+    ('KSC',  'Kuwaiti Shareholding Company',          'SUFFIX'),
+    ('KSCC', 'Kuwaiti Shareholding Company Closed',   'SUFFIX'),
+    ('PSC',  'Private Shareholding Company',          'SUFFIX'),
+    -- Joint Stock variants (BOTH: appear as prefix in CIS/Eastern European convention)
+    ('JSC',  'Joint Stock Company',                   'BOTH'),
+    ('OJSC', 'Open Joint Stock Company',              'BOTH'),
+    ('CJSC', 'Closed Joint Stock Company',            'BOTH'),
+    ('PJSC', 'Public Joint Stock Company',            'BOTH');
+END;
+"""
+
+
 def setup_sdn_input_table(conn, schema: str, drop: bool):
     """Create ScreeningInput in the SDN database if it does not already exist.
     When drop=True the table is dropped and recreated (data will be lost)."""
@@ -1349,6 +1499,7 @@ def setup_sdn_input_table(conn, schema: str, drop: bool):
         cur.execute(f"IF OBJECT_ID(N'[{schema}].[ScreeningInput]', N'U') IS NOT NULL "
                     f"DROP TABLE [{schema}].[ScreeningInput];")
     cur.execute(_DDL_SCREENING_INPUT.replace('{s}', schema))
+    cur.execute(_DDL_ENTITY_TYPE_MAP.replace('{s}', schema))
     conn.commit()
 
 
@@ -2816,13 +2967,18 @@ def _score_aka(fn_nm: str, ln_nm: str,
 
 def score_org_name(src_nm: str, sdn_nm: str,
                    jw_threshold: float,
-                   word_match: bool = True) -> tuple:
+                   word_match: bool = True,
+                   entity_map: dict = None) -> tuple:
     """
     Org name comparison.
     Returns (src_word_count, sdn_word_count,
              words_matching_jw, fullname_jw_similarity).
 
-    Full-string JW similarity is always computed.
+    Full-string JW similarity is always computed on the FULL strings (not stripped).
+
+    When entity_map is provided, word counts are computed on the name with any
+    matching entity type marker (prefix or suffix) stripped from both sides.
+    If only one side has a marker, or markers don't match, full word counts are used.
 
     When word_match=True (default):
       For each source word, scan every SDN word and count matches where
@@ -2834,16 +2990,38 @@ def score_org_name(src_nm: str, sdn_nm: str,
     """
     src_lower = src_nm.lower() if src_nm else ''
     sdn_lower = sdn_nm.lower() if sdn_nm else ''
-    src_words = src_lower.split()
-    sdn_words = sdn_lower.split()
 
-    # Full-string JW similarity (always computed).
+    # Full-string JW similarity (always computed on FULL strings).
     # Call _jaro_winkler_fast directly — skips edit-distance computation
     # that _score() performs but that is unused in this function.
     if src_lower and sdn_lower:
         full_jw = round(_jaro_winkler_fast(src_lower, sdn_lower) * 100, 2)
     else:
         full_jw = 0.0
+
+    # Determine words to use for counting (may be stripped of entity type marker)
+    if entity_map is not None:
+        src_words_upper = src_nm.upper().split() if src_nm else []
+        sdn_words_upper = sdn_nm.upper().split() if sdn_nm else []
+        # Try suffix strip first
+        src_suf, _, src_rest_suf = _strip_entity_suffix(src_words_upper, entity_map)
+        sdn_suf, _, sdn_rest_suf = _strip_entity_suffix(sdn_words_upper, entity_map)
+        if src_suf is not None and sdn_suf is not None and src_suf == sdn_suf:
+            src_words = [w.lower() for w in src_rest_suf]
+            sdn_words = [w.lower() for w in sdn_rest_suf]
+        else:
+            # Try prefix strip
+            src_pre, _, src_rest_pre = _strip_entity_prefix(src_words_upper, entity_map)
+            sdn_pre, _, sdn_rest_pre = _strip_entity_prefix(sdn_words_upper, entity_map)
+            if src_pre is not None and sdn_pre is not None and src_pre == sdn_pre:
+                src_words = [w.lower() for w in src_rest_pre]
+                sdn_words = [w.lower() for w in sdn_rest_pre]
+            else:
+                src_words = src_lower.split()
+                sdn_words = sdn_lower.split()
+    else:
+        src_words = src_lower.split()
+        sdn_words = sdn_lower.split()
 
     if not src_words or not sdn_words or not word_match:
         return len(src_words), len(sdn_words), 0, full_jw
@@ -2886,69 +3064,103 @@ def _entity_match_gate(src_wc: int, sdn_wc: int, jw_m: int, full_jw: float) -> b
 #      names, fall back to the existing _entity_match_gate().
 # ---------------------------------------------------------------------------
 
-_ENTITY_SUFFIX_PHRASES = sorted(
-    {abbr.upper() for abbr in ENTITY_SUFFIX_MAP}
-    | {full.upper() for full in ENTITY_SUFFIX_MAP.values()},
-    key=lambda p: -len(p.split())
-)
-
-_ENTITY_SUFFIX_CANON = {}
-for _abbr, _full in ENTITY_SUFFIX_MAP.items():
-    _ENTITY_SUFFIX_CANON[_abbr.upper()] = _full.upper()
-    _ENTITY_SUFFIX_CANON[_full.upper()] = _full.upper()
-
-
-def _strip_entity_suffix(words: list) -> tuple:
+def _strip_entity_suffix(words: list, entity_map: dict = None) -> tuple:
     """
-    If `words` (uppercase tokens) ends with a recognized Entity Suffix
+    If `words` (uppercase tokens) ends with a recognized entity type phrase
     (abbreviated or expanded form), return
-    (canonical_suffix, suffix_word_count, remaining_words).
+    (canonical_form, word_count, remaining_words).
     Otherwise return (None, 0, words).
+
+    Uses entity_map['suffix_phrases'] and entity_map['canon'] when provided.
     """
-    for phrase in _ENTITY_SUFFIX_PHRASES:
+    if entity_map is None:
+        return None, 0, words
+    suffix_phrases = entity_map.get('suffix_phrases', [])
+    canon = entity_map.get('canon', {})
+    for phrase in suffix_phrases:
         pw = phrase.split()
         n = len(pw)
         if len(words) >= n and words[-n:] == pw:
-            return _ENTITY_SUFFIX_CANON[phrase], n, words[:-n]
+            return canon.get(phrase, phrase), n, words[:-n]
     return None, 0, words
 
 
-def _entity_suffix_gate(src_nm: str, sdn_nm: str, jw_threshold: float):
+def _strip_entity_prefix(words: list, entity_map: dict = None) -> tuple:
     """
-    Returns True/False if an Entity Suffix is present and matches in both
-    names (decisive — overrides _entity_match_gate), or None if no Entity
-    Suffix is present/matching in both names (caller should fall back to
+    If `words` (uppercase tokens) STARTS WITH a recognized entity type phrase
+    (abbreviated or expanded form), return
+    (canonical_form, word_count, remaining_words).
+    Otherwise return (None, 0, words).
+
+    Uses entity_map['prefix_phrases'] and entity_map['canon'] when provided.
+    """
+    if entity_map is None:
+        return None, 0, words
+    prefix_phrases = entity_map.get('prefix_phrases', [])
+    canon = entity_map.get('canon', {})
+    for phrase in prefix_phrases:
+        pw = phrase.split()
+        n = len(pw)
+        if len(words) >= n and words[:n] == pw:
+            return canon.get(phrase, phrase), n, words[n:]
+    return None, 0, words
+
+
+def _entity_type_gate(src_nm: str, sdn_nm: str, jw_threshold: float,
+                      entity_map: dict = None):
+    """
+    Returns True/False if an entity type marker (prefix or suffix) is present
+    and matches in both names (decisive — overrides _entity_match_gate), or
+    None if no matching entity type marker is found (caller falls back to
     _entity_match_gate).
+
+    Checks suffix first; if no matching suffix, checks prefix.
     """
     src_words = src_nm.upper().split() if src_nm else []
     sdn_words = sdn_nm.upper().split() if sdn_nm else []
 
-    src_suffix, _, src_rest = _strip_entity_suffix(src_words)
-    sdn_suffix, _, sdn_rest = _strip_entity_suffix(sdn_words)
+    # --- Try suffix first ---
+    src_suffix, _, src_rest = _strip_entity_suffix(src_words, entity_map)
+    sdn_suffix, _, sdn_rest = _strip_entity_suffix(sdn_words, entity_map)
 
-    if src_suffix is None or sdn_suffix is None or src_suffix != sdn_suffix:
-        return None
+    if src_suffix is not None and sdn_suffix is not None and src_suffix == sdn_suffix:
+        n_other = len(src_rest)
+        if n_other == 0:
+            return True
+        jw_m = sum(
+            1 for sw in src_rest
+            if any(_jaro_winkler_fast(sw.lower(), dw.lower()) >= jw_threshold
+                   for dw in sdn_rest)
+        )
+        required = n_other if n_other <= 2 else n_other - 1
+        return jw_m >= required
 
-    n_other = len(src_rest)
-    if n_other == 0:
-        return True
+    # --- Try prefix ---
+    src_prefix, _, src_rest_p = _strip_entity_prefix(src_words, entity_map)
+    sdn_prefix, _, sdn_rest_p = _strip_entity_prefix(sdn_words, entity_map)
 
-    jw_m = sum(
-        1 for sw in src_rest
-        if any(_jaro_winkler_fast(sw.lower(), dw.lower()) >= jw_threshold
-               for dw in sdn_rest)
-    )
+    if src_prefix is not None and sdn_prefix is not None and src_prefix == sdn_prefix:
+        n_other = len(src_rest_p)
+        if n_other == 0:
+            return True
+        jw_m = sum(
+            1 for sw in src_rest_p
+            if any(_jaro_winkler_fast(sw.lower(), dw.lower()) >= jw_threshold
+                   for dw in sdn_rest_p)
+        )
+        required = n_other if n_other <= 2 else n_other - 1
+        return jw_m >= required
 
-    required = n_other if n_other <= 2 else n_other - 1
-    return jw_m >= required
+    return None
 
 
 def _entity_match_gate_v2(src_nm: str, sdn_nm: str,
                           src_wc: int, sdn_wc: int, jw_m: int, full_jw: float,
-                          jw_threshold: float) -> bool:
-    suffix_result = _entity_suffix_gate(src_nm, sdn_nm, jw_threshold)
-    if suffix_result is not None:
-        return suffix_result
+                          jw_threshold: float,
+                          entity_map: dict = None) -> bool:
+    type_result = _entity_type_gate(src_nm, sdn_nm, jw_threshold, entity_map)
+    if type_result is not None:
+        return type_result
     return _entity_match_gate(src_wc, sdn_wc, jw_m, full_jw)
 
 
@@ -3382,7 +3594,7 @@ _WK: dict = {}   # populated by _worker_init in each worker process
 def _worker_init(sdn_entry_map, name_idx, aka_by_sdn,
                  entity_org_map, entity_aka_norm,
                  jw_name_pct, jw_org_threshold, jw_org_aka_threshold,
-                 run_org_word_match, strip_pat):
+                 run_org_word_match, strip_pat, entity_map=None):
     """Called once per worker process; stores SDN reference data in _WK."""
     global _WK
     _WK = dict(
@@ -3396,6 +3608,7 @@ def _worker_init(sdn_entry_map, name_idx, aka_by_sdn,
         jw_org_aka_threshold = jw_org_aka_threshold,
         run_org_word_match   = run_org_word_match,
         strip_pat            = strip_pat,
+        entity_map           = entity_map,
     )
 
 
@@ -3461,20 +3674,26 @@ def _score_entity_keys_batch(keys_batch: list) -> dict:
     jw_org_aka_threshold = wk['jw_org_aka_threshold']
     run_org_word_match   = wk['run_org_word_match']
 
+    entity_map           = wk.get('entity_map')
+
     result: dict = {}
     for src_org in keys_batch:
         # Pass 3 — Entity sdnEntry full cross-comparison
         _p3_org: list = []
         for _uid, (_sdn_raw, _sdn_nm) in entity_org_map.items():
-            _sc = score_org_name(src_org, _sdn_nm, jw_org_threshold, run_org_word_match)
-            if _entity_match_gate_v2(src_org, _sdn_nm, *_sc, jw_org_threshold):
+            _sc = score_org_name(src_org, _sdn_nm, jw_org_threshold, run_org_word_match,
+                                 entity_map)
+            if _entity_match_gate_v2(src_org, _sdn_nm, *_sc, jw_org_threshold,
+                                     entity_map):
                 _p3_org.append((_uid, _sdn_raw, _sdn_nm) + tuple(_sc))
 
         # Pass 3b — Entity AKA full cross-comparison
         _p3b_aka: list = []
         for (_suid, _auid), (_araw, _anm, _acat) in entity_aka_norm.items():
-            _sc = score_org_name(src_org, _anm, jw_org_aka_threshold, run_org_word_match)
-            if _entity_match_gate_v2(src_org, _anm, *_sc, jw_org_aka_threshold):
+            _sc = score_org_name(src_org, _anm, jw_org_aka_threshold, run_org_word_match,
+                                 entity_map)
+            if _entity_match_gate_v2(src_org, _anm, *_sc, jw_org_aka_threshold,
+                                     entity_map):
                 _p3b_aka.append(
                     (_suid, _auid, _s(_acat), _araw, _anm) + tuple(_sc))
 
@@ -3501,6 +3720,7 @@ def _precompute_duckdb(
     jw_org_aka_threshold: float,
     run_org_word_match: bool,
     strip_pat,
+    entity_map: dict = None,
 ) -> None:
     """
     Populate indiv_name_cache and entity_name_cache using DuckDB's built-in
@@ -3801,7 +4021,7 @@ def _precompute_duckdb(
             entity_nm, uid, raw_nm, norm_nm, full_jw = row
             src_wc, sdn_wc, jw_m = _word_counts(entity_nm, norm_nm)
             if not _entity_match_gate_v2(entity_nm, norm_nm, src_wc, sdn_wc, jw_m,
-                                          full_jw, jw_org_threshold):
+                                          full_jw, jw_org_threshold, entity_map):
                 continue
             entry = entity_name_cache[entity_nm]
             entry['org'].append(
@@ -3813,7 +4033,7 @@ def _precompute_duckdb(
             entity_nm, suid, auid, acat, raw_nm, norm_nm, full_jw = row
             src_wc, sdn_wc, jw_m = _word_counts(entity_nm, norm_nm)
             if not _entity_match_gate_v2(entity_nm, norm_nm, src_wc, sdn_wc, jw_m,
-                                          full_jw, jw_org_aka_threshold):
+                                          full_jw, jw_org_aka_threshold, entity_map):
                 continue
             entry = entity_name_cache[entity_nm]
             entry['org_aka'].append(
@@ -3962,12 +4182,18 @@ def main():
         abbrev_map = load_abbrev_map(sdn_conn)
         print(f"  {len(abbrev_map):,} abbreviations loaded.")
 
+        # Load entity type map from the SDN database
+        print("Loading entity type map...")
+        entity_map = load_entity_type_map(sdn_conn)
+        print(f"  {len(entity_map['suffix_phrases']) + len(entity_map['prefix_phrases'])} entity type phrases loaded.")
+
         name_idx = load_sdn_names(sdn_conn, strip_pat, sdn_limit=args.sdn_limit)
         addresses, addr_word_index = load_sdn_addresses(sdn_conn, abbrev_map, strip_pat,
                                                         sdn_limit=args.sdn_limit)
         (linked_to_by_uid, phones_by_uid,
          lt_word_index, phone_last7_idx) = load_sdn_remarks(sdn_conn, strip_pat,
-                                                            sdn_limit=args.sdn_limit)
+                                                            sdn_limit=args.sdn_limit,
+                                                            entity_map=entity_map)
 
     # Load input records
     if args.input_csv:
@@ -4007,7 +4233,7 @@ def main():
     # Normalise all input records up front
     print("Normalising input records...")
     for rec in input_records:
-        normalize_input(rec, abbrev_map, strip_pat)
+        normalize_input(rec, abbrev_map, strip_pat, entity_map)
     print(f"  {len(input_records):,} records normalised")
 
     # Setup output
@@ -4043,7 +4269,7 @@ def main():
         if sdt != 'Entity':
             continue
         raw_ln  = ln or ''
-        norm_ln = _ph_norm_name(expand_entity_nm(raw_ln, strip_pat))
+        norm_ln = _ph_norm_name(expand_entity_nm(raw_ln, strip_pat, entity_map))
         entity_org_map[uid] = (raw_ln if ln else None, norm_ln)
     n_entities = len(entity_org_map)
     print(f"SDN coverage (Pass 3 — Entities):    {n_entities:,} Entity sdnEntry records.")
@@ -4063,7 +4289,7 @@ def main():
     for sdn_uid, akas in entity_aka_by_sdn.items():
         for aka_uid, ln, category in akas:
             raw_ln  = ln or ''
-            norm_ln = _ph_norm_name(expand_entity_nm(raw_ln, strip_pat))
+            norm_ln = _ph_norm_name(expand_entity_nm(raw_ln, strip_pat, entity_map))
             entity_aka_norm[(sdn_uid, aka_uid)] = (raw_ln if ln else None, norm_ln, category)
     n_entity_akas = len(entity_aka_norm)
     print(f"SDN coverage (Pass 3b — Entity AKAs): {n_entity_akas:,} Entity AKA entries.")
@@ -4083,7 +4309,7 @@ def main():
             strip_pat        = strip_pat,
         )
         for rec in dummy_recs:
-            normalize_input(rec, abbrev_map, strip_pat)
+            normalize_input(rec, abbrev_map, strip_pat, entity_map)
         n_with_addr = sum(1 for r in dummy_recs if r.city or r.country)
         # Persist to ScreeningInput so dummy rows appear alongside real data
         with pyodbc.connect(sdn_cs) as sdn_conn:
@@ -4143,7 +4369,7 @@ def main():
             name_idx, aka_by_sdn, sdn_entry_map,
             entity_org_map, entity_aka_norm,
             jw_name_pct, jw_org_threshold, jw_org_aka_threshold,
-            run_org_word_match, strip_pat,
+            run_org_word_match, strip_pat, entity_map,
         )
         _t1_pre = time.perf_counter()
         print(f"  {n_indiv_keys + n_entity_keys:,} keys precomputed "
@@ -4159,7 +4385,7 @@ def main():
         _init_args = (sdn_entry_map, name_idx, aka_by_sdn,
                       entity_org_map, entity_aka_norm,
                       jw_name_pct, jw_org_threshold, jw_org_aka_threshold,
-                      run_org_word_match, strip_pat)
+                      run_org_word_match, strip_pat, entity_map)
 
         def _chunk(lst: list, n: int) -> list:
             k = max(1, math.ceil(len(lst) / n))
@@ -4335,8 +4561,10 @@ def main():
                         _sc = score_org_name(
                             src_org, _sdn_nm,
                             jw_org_threshold,
-                            run_org_word_match)
-                        if _entity_match_gate_v2(src_org, _sdn_nm, *_sc, jw_org_threshold):
+                            run_org_word_match,
+                            entity_map)
+                        if _entity_match_gate_v2(src_org, _sdn_nm, *_sc, jw_org_threshold,
+                                                 entity_map):
                             _p3_org.append((_uid, _sdn_raw, _sdn_nm) + tuple(_sc))
 
                     # Pass 3b — Entity AKA full cross-comparison
@@ -4346,8 +4574,10 @@ def main():
                         _sc = score_org_name(
                             src_org, _anm,
                             jw_org_aka_threshold,
-                            run_org_word_match)
-                        if _entity_match_gate_v2(src_org, _anm, *_sc, jw_org_aka_threshold):
+                            run_org_word_match,
+                            entity_map)
+                        if _entity_match_gate_v2(src_org, _anm, *_sc, jw_org_aka_threshold,
+                                                 entity_map):
                             _p3b_aka.append(
                                 (_suid, _auid, _s(_acat), _araw, _anm)
                                 + tuple(_sc))
@@ -4453,10 +4683,11 @@ def main():
                         for _occ, _lt_raw, _lt_nm, _lt_nm_exp in _occ_list:
                             _src_wc, _lt_wc, _jw_wm, _jw = score_org_name(
                                 lt_entity_key, _lt_nm_exp,
-                                jw_org_threshold, word_match=True)
+                                jw_org_threshold, word_match=True,
+                                entity_map=entity_map)
                             if _entity_match_gate_v2(lt_entity_key, _lt_nm_exp,
                                                       _src_wc, _lt_wc, _jw_wm, _jw,
-                                                      jw_org_threshold):
+                                                      jw_org_threshold, entity_map):
                                 _lt_full_rows_e.append(
                                     (_uid, _occ, _lt_raw, _lt_nm, _lt_nm_exp,
                                      lt_entity_key, 'EntityName', _src_wc, _lt_wc, _jw_wm, _jw)
