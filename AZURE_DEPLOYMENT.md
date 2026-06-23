@@ -89,10 +89,10 @@ The script already supports SQL-authentication connection strings via the
 Each of the two logical databases (`SDN`, `SDNReporting`) becomes its own
 **Azure SQL Database**. They can both live on the **same logical server**
 (e.g. `myserver.database.windows.net`) — Azure SQL doesn't support
-cross-database queries, but as confirmed earlier, this script never issues any
-(each `pyodbc.connect()` targets exactly one database).
+cross-database queries, but no script in this pipeline issues cross-database
+queries (each `pyodbc.connect()` targets exactly one database).
 
-Note: the address-abbreviation table (`dbo.Address_Abbreviation`) is now read
+Note: the address-abbreviation table (`dbo.Address_Abbreviation`) is read
 from the `SDN` database, so it must exist there.
 
 ### 2.2 Firewall / networking
@@ -107,16 +107,22 @@ from the `SDN` database, so it must exist there.
 
 **Option A — SQL login (simplest)**
 
-Create a SQL login/user with appropriate permissions (db_datareader on SDN;
-db_datareader + db_datawriter + db_ddladmin on SDNReporting, since the script
-creates/drops tables there).
+The pipeline writes to both databases: `xml_import.py --drop` recreates all
+tables in SDN; `sdn_match_v2.py` and `export_results.py` write to SDNReporting.
+Grant the SQL user full write access to both:
 
 ```sql
--- run once on each database, as the server admin
+-- Run as server admin on the SDN database
 CREATE USER sdn_match_app WITH PASSWORD = 'StrongPassword!123';
-ALTER ROLE db_datareader ADD MEMBER sdn_match_app;          -- SDN, SDNReporting
-ALTER ROLE db_datawriter ADD MEMBER sdn_match_app;          -- SDNReporting only
-ALTER ROLE db_ddladmin    ADD MEMBER sdn_match_app;          -- SDNReporting only
+ALTER ROLE db_datareader  ADD MEMBER sdn_match_app;
+ALTER ROLE db_datawriter  ADD MEMBER sdn_match_app;
+ALTER ROLE db_ddladmin    ADD MEMBER sdn_match_app;   -- needed for DROP/CREATE TABLE
+
+-- Run as server admin on the SDNReporting database
+CREATE USER sdn_match_app WITH PASSWORD = 'StrongPassword!123';
+ALTER ROLE db_datareader  ADD MEMBER sdn_match_app;
+ALTER ROLE db_datawriter  ADD MEMBER sdn_match_app;
+ALTER ROLE db_ddladmin    ADD MEMBER sdn_match_app;   -- needed for CREATE TABLE / ALTER TABLE
 ```
 
 Then set environment variables for the container:
@@ -167,7 +173,9 @@ cd C:\pythonscripts
 
 # One-time setup
 git init
-git add sdn_match_v2.py sdn_match_v2.cfg requirements.txt Dockerfile
+git add sdn_match_v2.py sdn_match_v2.cfg requirements.txt Dockerfile \
+        xml_import.py download_sdn_xml.py export_results.py \
+        create_report_view.sql run_azure.sh run_local.bat
 git commit -m "Initial commit of SDN matching v2"
 
 # Create the GitHub repo and push (requires GitHub CLI: gh auth login first)
@@ -187,12 +195,12 @@ A few things worth adding before the first commit:
   GitHub Actions secrets / Azure Key Vault, not in `sdn_match_v2.cfg` or
   any committed file.
 
-If the repo already exists and you're just adding these new files
-(`requirements.txt`, `Dockerfile`):
+If the repo already exists and you're adding the new pipeline files:
 
 ```bash
-git add requirements.txt Dockerfile
-git commit -m "Add Docker packaging for Azure deployment"
+git add Dockerfile run_azure.sh download_sdn_xml.py \
+        xml_import.py export_results.py create_report_view.sql run_local.bat
+git commit -m "Add full pipeline: download → import → match → export"
 git push
 ```
 
@@ -219,6 +227,18 @@ az containerapp env create \
   --location eastus
 ```
 
+**One-time database setup — run once against SDNReporting before the first pipeline run:**
+
+`MatchingResults_Report` is a VIEW (not a physical table). It must be created
+once in the SDNReporting database before any export will succeed. Run
+`create_report_view.sql` via the Azure portal Query Editor or sqlcmd:
+
+```bash
+sqlcmd -S myserver.database.windows.net -d SDNReporting \
+       -U sdn_match_app -P 'StrongPassword!123' \
+       -i create_report_view.sql
+```
+
 ### 4.2 Initial build & push
 
 ```bash
@@ -228,48 +248,104 @@ cd C:\pythonscripts
 az acr build --registry sdnmatchacr --image sdn-match:latest .
 ```
 
-### 4.3 Create the Container Apps Job
+### 4.3 Pipeline overview
+
+The container image runs `run_azure.sh`, which executes four steps:
+
+| Step | Script | What it does |
+|------|--------|--------------|
+| 1/4  | `download_sdn_xml.py` | Downloads SDN.XML from OFAC (follows 302→S3), uploads to blob root |
+| 2/4  | `xml_import.py` | Drops and recreates SDN tables, bulk-imports the XML |
+| 3/4  | `sdn_match_v2.py` | Runs all match types against the input screening list |
+| 4/4  | `export_results.py` | Exports CSVs to blob under `logs/{sdn_date}/`, archives SDN.XML, truncates detail tables |
+
+All configuration is passed via environment variables; no `--command`/`--args`
+are needed when creating the job.
+
+### 4.4 Create the Container Apps Job
 
 ```bash
 az containerapp job create \
-  --resource-group rg-sdn-match \
-  --name sdn-match-job \
-  --environment sdn-match-env \
-  --trigger-type Manual \
-  --replica-timeout 3600 \
+  --resource-group    rg-sdn-match \
+  --name              sdn-match-job \
+  --environment       sdn-match-env \
+  --trigger-type      Manual \
+  --replica-timeout   7200 \
   --replica-retry-limit 0 \
-  --parallelism 1 \
-  --image sdnmatchacr.azurecr.io/sdn-match:latest \
-  --registry-server sdnmatchacr.azurecr.io \
+  --parallelism       1 \
+  --image             sdnmatchacr.azurecr.io/sdn-match:latest \
+  --registry-server   sdnmatchacr.azurecr.io \
   --cpu 2 --memory 4Gi \
-  --env-vars SQL_USER=sdn_match_app SQL_PASSWORD=secretref:sql-password \
-  --secrets sql-password=StrongPassword!123 \
-  --command "python" \
-  --args "sdn_match_v2.py" "--input-screening" "--no-csv" \
-          "--sdn-server" "myserver.database.windows.net" \
-          "--out-server" "myserver.database.windows.net"
+  --env-vars \
+      SQL_SERVER=myserver.database.windows.net \
+      SDN_DB=SDN \
+      OUT_DB=SDNReporting \
+      SQL_USER=sdn_match_app \
+      "SQL_PASSWORD=secretref:sql-password" \
+      STORAGE_CONTAINER=sdn \
+  --secrets "sql-password=StrongPassword!123"
 ```
 
-Notes:
-- `--trigger-type Manual` means the job runs only when explicitly started
-  (via CLI, REST API, or — see Section 5 — Azure Data Factory).
-  Use `Schedule` instead if you want it to run on a cron schedule
-  automatically.
-- `--replica-retry-limit 0` avoids silently re-running a partially-completed
-  matching run; investigate failures manually instead.
-- `secretref:` + `--secrets` keeps the password out of the job definition's
-  plain-text env-var list (still visible to anyone with read access to the
-  job, but separated from the `--env-vars` list for clarity — for real
-  production use, pull from **Azure Key Vault** via a Key Vault reference
-  instead).
+The `STORAGE_CONNECTION_STRING` secret is long — set it separately after creation
+(see 4.5 below) rather than embedding it in the create command.
 
-### 4.4 Running it manually
+Notes:
+- `--trigger-type Manual` — runs only when explicitly started (CLI, REST, or ADF).
+  Change to `--trigger-type Schedule --cron-expression "0 6 * * 1"` for a
+  weekly Monday 06:00 UTC run.
+- `--replica-timeout 7200` — 2-hour limit; a full SDN import + match may take
+  60–90 minutes depending on input size.
+- `--replica-retry-limit 0` — no automatic retry; investigate failures manually.
+  Re-running a partially-completed pipeline is safe: xml_import uses `--drop`,
+  and sdn_match_v2 creates a new Run_ID each time.
+- All secrets use `secretref:` so plain-text passwords never appear in the
+  env-var list. For production, use **Azure Key Vault references** instead.
+
+### 4.5 Add STORAGE_CONNECTION_STRING after creation
+
+```bash
+# Retrieve your storage connection string from the portal or:
+CONN=$(az storage account show-connection-string \
+         --resource-group rg-sdn-match \
+         --name storagedisstondata \
+         --query connectionString -o tsv)
+
+az containerapp job secret set \
+  --resource-group rg-sdn-match \
+  --name sdn-match-job \
+  --secrets "storage-conn-str=$CONN"
+
+az containerapp job update \
+  --resource-group rg-sdn-match \
+  --name sdn-match-job \
+  --set-env-vars "STORAGE_CONNECTION_STRING=secretref:storage-conn-str"
+```
+
+### 4.6 Optional: limit SDN entries for QA runs
+
+```bash
+az containerapp job update \
+  --resource-group rg-sdn-match \
+  --name sdn-match-job \
+  --set-env-vars "SDN_LIMIT=500"
+```
+
+Remove the limit for production runs:
+
+```bash
+az containerapp job update \
+  --resource-group rg-sdn-match \
+  --name sdn-match-job \
+  --remove-env-vars SDN_LIMIT
+```
+
+### 4.7 Running manually
 
 ```bash
 az containerapp job start --resource-group rg-sdn-match --name sdn-match-job
 ```
 
-### 4.5 Redeploying after code changes (manual)
+### 4.8 Redeploying after code changes (manual)
 
 ```bash
 az acr build --registry sdnmatchacr --image sdn-match:latest .
@@ -278,7 +354,7 @@ az containerapp job update \
   --image sdnmatchacr.azurecr.io/sdn-match:latest
 ```
 
-### 4.6 Continuous deployment from GitHub (CI/CD)
+### 4.9 Continuous deployment from GitHub (CI/CD)
 
 The simplest approach is a GitHub Actions workflow that builds the image on
 every push to `main` and updates the job. Create
