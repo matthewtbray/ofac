@@ -421,6 +421,8 @@ class InputRecord:
     entity_type:  Optional[str] = None   # Individual | Entity | Unknown
     entity_name:  Optional[str] = None
     external_id:  Optional[str] = None   # Source-system identifier (e.g. ENTITY_NUM)
+    contact_id:   Optional[str] = None   # Salesforce Contact ID (from ScreeningInput.Contact_ID)
+    entity_id:    Optional[str] = None   # Salesforce Entity ID  (from ScreeningInput.Entity_ID)
     first_name:   Optional[str] = None
     middle_name:  Optional[str] = None
     last_name:    Optional[str] = None
@@ -1306,6 +1308,9 @@ def setup_output_tables(conn, schema: str, drop: bool):
     cur = conn.cursor()
     cur.execute(_DDL_RUNLOG.replace('{s}', schema))
     if drop:
+        # Drop MatchingResults_GatePassing (no FK dependencies)
+        cur.execute(f"IF OBJECT_ID(N'[{schema}].[MatchingResults_GatePassing]', N'U') IS NOT NULL "
+                    f"DROP TABLE [{schema}].[MatchingResults_GatePassing];")
         # Drop MatchingResults_Address first (FK -> StreetAddressMatchType + RunLog)
         cur.execute(f"IF OBJECT_ID(N'[{schema}].[MatchingResults_Address]', N'U') IS NOT NULL "
                     f"DROP TABLE [{schema}].[MatchingResults_Address];")
@@ -1342,6 +1347,8 @@ def setup_output_tables(conn, schema: str, drop: bool):
     # Post-processing summary tables
     cur.execute(_DDL_SUMMARY_PERSON.replace('{s}', schema))
     cur.execute(_DDL_SUMMARY_ORG.replace('{s}', schema))
+    # Gate-passing audit table (no FK dependencies on RunLog)
+    cur.execute(_DDL_GATE_PASSING.replace('{s}', schema))
     conn.commit()
     seed_addr_match_types(conn, schema)
 
@@ -1892,6 +1899,8 @@ def load_input_screening(server: str, database: str, schema: str = 'dbo',
             recs.append(InputRecord(
                 entity_type = 'Entity',
                 external_id = entity_id or screening_id,
+                contact_id  = contact_id,
+                entity_id   = entity_id,
                 first_name  = None,
                 middle_name = None,
                 last_name   = None,
@@ -1903,6 +1912,8 @@ def load_input_screening(server: str, database: str, schema: str = 'dbo',
             recs.append(InputRecord(
                 entity_type = 'Individual',
                 external_id = contact_id or screening_id,
+                contact_id  = contact_id,
+                entity_id   = entity_id,
                 first_name  = first_name,
                 middle_name = middle_name,
                 last_name   = last_name,
@@ -2319,6 +2330,65 @@ BEGIN
     CREATE INDEX IX_MRA_Run         ON [{s}].[MatchingResults_Address] (Run_ID);
     CREATE INDEX IX_MRA_SDNEntry    ON [{s}].[MatchingResults_Address] (SDNEntry_UID);
     CREATE INDEX IX_MRA_InputRecord ON [{s}].[MatchingResults_Address] (Input_Record_ID);
+END;
+"""
+
+# ---------------------------------------------------------------------------
+# MatchingResults_GatePassing  DDL
+# Lives in the OUTPUT database (SDNReporting).  One row per gate-passing
+# name match × SDN address combination, with full-address JW comparisons.
+# ---------------------------------------------------------------------------
+
+_DDL_GATE_PASSING = """
+IF OBJECT_ID(N'[{s}].[MatchingResults_GatePassing]', N'U') IS NULL
+BEGIN
+    CREATE TABLE [{s}].[MatchingResults_GatePassing] (
+        GatePassing_ID          BIGINT         NOT NULL IDENTITY(1,1),
+        Run_ID                  INT            NOT NULL,
+        Input_Record_ID         INT            NOT NULL,
+        Contact_ID              VARCHAR(255)   NULL,
+        Entity_ID               VARCHAR(255)   NULL,
+        Input_Type              VARCHAR(20)    NULL,   -- Individual / Entity
+        InputFN                 NVARCHAR(255)  NULL,
+        InputLN                 NVARCHAR(500)  NULL,
+        InputOrgNM              NVARCHAR(900)  NULL,
+        InputStreet             NVARCHAR(500)  NULL,
+        InputCity               NVARCHAR(200)  NULL,
+        InputRegion             NVARCHAR(100)  NULL,
+        InputPostalCode         VARCHAR(20)    NULL,
+        InputCountry            NVARCHAR(100)  NULL,
+        SDN_UID                 INT            NOT NULL,
+        SDN_AKA_UID             INT            NULL,
+        SDN_Address_UID         INT            NULL,
+        SDN_Type                VARCHAR(50)    NULL,
+        SDN_Name_Type           VARCHAR(10)    NULL,   -- Regular / AKA
+        SDNCompareFN            NVARCHAR(255)  NULL,
+        SDNCompareLN            NVARCHAR(900)  NULL,
+        SDNStreet               NVARCHAR(500)  NULL,
+        SDNCity                 NVARCHAR(200)  NULL,
+        SDNRegion               NVARCHAR(100)  NULL,
+        SDNPostalCode           VARCHAR(20)    NULL,
+        SDNCountry              NVARCHAR(100)  NULL,
+        FN_JW                   DECIMAL(5,2)   NULL,
+        LN_JW                   DECIMAL(5,2)   NULL,
+        OrgNM_JW                DECIMAL(5,2)   NULL,
+        FullAddress_JW          DECIMAL(5,2)   NULL,
+        Country_JW              DECIMAL(5,2)   NULL,
+        CityCountry_JW          DECIMAL(5,2)   NULL,
+        RegionCountry_JW        DECIMAL(5,2)   NULL,
+        OrgName_Input_WordCount INT            NULL,
+        OrgName_SDN_WordCount   INT            NULL,
+        OrgName_Match_WordCount INT            NULL,
+        Processing_Timestamp    DATETIME       NOT NULL DEFAULT GETDATE(),
+        SDN_List_Version_Date   DATETIME       NULL,
+        MatchDisposition        DECIMAL(5,2)   NULL,
+        CONSTRAINT PK_MatchingResults_GatePassing PRIMARY KEY (GatePassing_ID)
+    );
+    CREATE INDEX IX_GP_Run         ON [{s}].[MatchingResults_GatePassing] (Run_ID);
+    CREATE INDEX IX_GP_Input       ON [{s}].[MatchingResults_GatePassing] (Input_Record_ID);
+    CREATE INDEX IX_GP_SDN         ON [{s}].[MatchingResults_GatePassing] (SDN_UID);
+    CREATE INDEX IX_GP_Contact     ON [{s}].[MatchingResults_GatePassing] (Contact_ID);
+    CREATE INDEX IX_GP_Entity      ON [{s}].[MatchingResults_GatePassing] (Entity_ID);
 END;
 """
 
@@ -2930,6 +3000,47 @@ def _field_scores(inp: str, sdn: str) -> float:
     if not iv or not sv:
         return 0.00
     return round(_jaro_winkler_fast(iv, sv) * 100, 2)
+
+
+def _addr_full_str(street: str, city: str, region: str, postal: str, country: str) -> str:
+    """Concatenate normalized address fields into one comparable string."""
+    parts = [p for p in (street, city, region, postal, country) if p]
+    return ' '.join(parts).upper()
+
+
+def _full_address_jw(rec_street_nm: str, rec_city_nm: str, rec_region_nm: str,
+                     rec_postal_nm: str, rec_country_nm: str,
+                     sdn_street_nm: str, sdn_city_nm: str, sdn_region_nm: str,
+                     sdn_postal_nm: str, sdn_country_nm: str) -> float:
+    src = _addr_full_str(rec_street_nm, rec_city_nm, rec_region_nm, rec_postal_nm, rec_country_nm)
+    sdn = _addr_full_str(sdn_street_nm, sdn_city_nm, sdn_region_nm, sdn_postal_nm, sdn_country_nm)
+    if not src or not sdn:
+        return 0.0
+    return round(_jaro_winkler_fast(src.lower(), sdn.lower()) * 100, 2)
+
+
+def _country_jw(rec_country_nm: str, sdn_country_nm: str) -> float:
+    if not rec_country_nm or not sdn_country_nm:
+        return 0.0
+    return round(_jaro_winkler_fast(rec_country_nm.lower(), sdn_country_nm.lower()) * 100, 2)
+
+
+def _city_country_jw(rec_city_nm: str, rec_country_nm: str,
+                     sdn_city_nm: str, sdn_country_nm: str) -> float:
+    src = ' '.join(p for p in (rec_city_nm, rec_country_nm) if p).lower()
+    sdn = ' '.join(p for p in (sdn_city_nm, sdn_country_nm) if p).lower()
+    if not src or not sdn:
+        return 0.0
+    return round(_jaro_winkler_fast(src, sdn) * 100, 2)
+
+
+def _region_country_jw(rec_region_nm: str, rec_country_nm: str,
+                       sdn_region_nm: str, sdn_country_nm: str) -> float:
+    src = ' '.join(p for p in (rec_region_nm, rec_country_nm) if p).lower()
+    sdn = ' '.join(p for p in (sdn_region_nm, sdn_country_nm) if p).lower()
+    if not src or not sdn:
+        return 0.0
+    return round(_jaro_winkler_fast(src, sdn) * 100, 2)
 
 
 def score_name_candidate(fn_nm: str, ln_nm: str,
@@ -4078,6 +4189,190 @@ def _sdn_limit_type(v: str):
         raise argparse.ArgumentTypeError('--sdn-limit must be a positive integer or ALL')
 
 
+_SQL_GP_INSERT = """
+INSERT INTO [{s}].[MatchingResults_GatePassing] (
+    Run_ID, Input_Record_ID, Contact_ID, Entity_ID,
+    Input_Type, InputFN, InputLN, InputOrgNM,
+    InputStreet, InputCity, InputRegion, InputPostalCode, InputCountry,
+    SDN_UID, SDN_AKA_UID, SDN_Address_UID,
+    SDN_Type, SDN_Name_Type, SDNCompareFN, SDNCompareLN,
+    SDNStreet, SDNCity, SDNRegion, SDNPostalCode, SDNCountry,
+    FN_JW, LN_JW, OrgNM_JW,
+    FullAddress_JW, Country_JW, CityCountry_JW, RegionCountry_JW,
+    OrgName_Input_WordCount, OrgName_SDN_WordCount, OrgName_Match_WordCount,
+    SDN_List_Version_Date
+) VALUES (?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?)
+"""
+
+
+def _phase3_gate_passing(out_conn, schema: str, run_id: int,
+                          rec_by_id: dict,
+                          addr_by_sdn_uid: dict,
+                          sdn_entry_map: dict,
+                          pub_date,
+                          run_ts) -> int:
+    """
+    Phase 3: build MatchingResults_GatePassing rows for all gate-passing name matches.
+
+    rec_by_id       : {input_record_id (int) -> InputRecord}
+    addr_by_sdn_uid : {sdn_entry_uid (int) -> [SdnAddress]}
+    sdn_entry_map   : {sdn_uid -> (fn, ln, sdt)} — for SDN_Type
+    pub_date        : SDN publish date (datetime or None)
+    run_ts          : unused (Processing_Timestamp uses SQL DEFAULT GETDATE())
+
+    Returns total rows written.
+    """
+    cur = out_conn.cursor()
+    rows_written = 0
+    batch = []
+    BATCH_SIZE = 2000
+
+    def _flush():
+        nonlocal rows_written
+        if not batch:
+            return
+        cur.fast_executemany = True
+        cur.executemany(_SQL_GP_INSERT.replace('{s}', schema), batch)
+        out_conn.commit()
+        rows_written += len(batch)
+        batch.clear()
+
+    def _emit(input_record_id, rec, sdn_uid, aka_uid, name_type,
+              sdn_fn, sdn_ln, fn_jw, ln_jw, org_jw,
+              wc_src, wc_sdn, wc_match, sdn_addr):
+        """Build one output row; sdn_addr may be None if the SDN entry has no addresses."""
+        entry = sdn_entry_map.get(sdn_uid)
+        sdn_type = entry[2] if entry else None
+
+        if sdn_addr:
+            street_nm  = sdn_addr.address1_nm
+            city_nm    = sdn_addr.city_nm
+            region_nm  = sdn_addr.state_province_nm
+            postal_nm  = sdn_addr.postal_code_nm
+            country_nm = sdn_addr.country_nm
+            addr_uid   = sdn_addr.sdn_addr_uid
+            street_raw = sdn_addr.address1
+            city_raw   = sdn_addr.city
+            region_raw = sdn_addr.state_province
+            postal_raw = sdn_addr.postal_code
+            country_raw= sdn_addr.country
+        else:
+            street_nm = city_nm = region_nm = postal_nm = country_nm = ''
+            addr_uid  = None
+            street_raw= city_raw = region_raw = postal_raw = country_raw = None
+
+        fa_jw  = _full_address_jw(
+            rec.address1_nm, rec.city_nm, rec.region_nm, rec.postal_code_nm, rec.country_nm,
+            street_nm, city_nm, region_nm, postal_nm, country_nm)
+        co_jw  = _country_jw(rec.country_nm, country_nm)
+        cc_jw  = _city_country_jw(rec.city_nm, rec.country_nm, city_nm, country_nm)
+        rc_jw  = _region_country_jw(rec.region_nm, rec.country_nm, region_nm, country_nm)
+
+        batch.append((
+            run_id, input_record_id,
+            rec.contact_id, rec.entity_id,
+            rec.entity_type,
+            rec.first_name,  rec.last_name,  rec.entity_name,
+            rec.address1,    rec.city,        rec.region,
+            rec.postal_code, rec.country,
+            sdn_uid, aka_uid, addr_uid,
+            sdn_type, name_type,
+            sdn_fn, sdn_ln,
+            street_raw, city_raw, region_raw, postal_raw, country_raw,
+            fn_jw, ln_jw, org_jw,
+            fa_jw, co_jw, cc_jw, rc_jw,
+            wc_src, wc_sdn, wc_match,
+            pub_date,
+        ))
+        if len(batch) >= BATCH_SIZE:
+            _flush()
+
+    def _emit_with_addrs(input_record_id, rec, sdn_uid, aka_uid, name_type,
+                          sdn_fn, sdn_ln, fn_jw, ln_jw, org_jw,
+                          wc_src, wc_sdn, wc_match):
+        addrs = addr_by_sdn_uid.get(sdn_uid)
+        if addrs:
+            for sdn_addr in addrs:
+                _emit(input_record_id, rec, sdn_uid, aka_uid, name_type,
+                      sdn_fn, sdn_ln, fn_jw, ln_jw, org_jw,
+                      wc_src, wc_sdn, wc_match, sdn_addr)
+        else:
+            _emit(input_record_id, rec, sdn_uid, aka_uid, name_type,
+                  sdn_fn, sdn_ln, fn_jw, ln_jw, org_jw,
+                  wc_src, wc_sdn, wc_match, None)
+
+    # ---- Person primary name (gate: Personal_Name_Match = 1) ----
+    person_rows = cur.execute(f"""
+        SELECT Input_Record_ID, SDN_UID,
+               SourceFN, SourceLN, SDNFN, SDNLN,
+               FirstName_JaroWinklerSimilarity, LastName_JaroWinklerSimilarity
+        FROM   [{schema}].[MatchingResults_Person_Full]
+        WHERE  Run_ID = ? AND Personal_Name_Match = 1
+    """, [run_id]).fetchall()
+    for row in person_rows:
+        rec = rec_by_id.get(row[0])
+        if not rec:
+            continue
+        _emit_with_addrs(row[0], rec, row[1], None, 'Regular',
+                          row[4], row[5],
+                          row[6], row[7], None,
+                          None, None, None)
+
+    # ---- Person AKA (gate: Personal_Name_Match = 1) ----
+    aka_rows = cur.execute(f"""
+        SELECT Input_Record_ID, SDN_UID, AKA_UID,
+               SourceFN, SourceLN, SDNFN, SDNLN,
+               FirstName_JaroWinklerSimilarity, LastName_JaroWinklerSimilarity
+        FROM   [{schema}].[MatchingResults_AKA]
+        WHERE  Run_ID = ? AND Personal_Name_Match = 1
+    """, [run_id]).fetchall()
+    for row in aka_rows:
+        rec = rec_by_id.get(row[0])
+        if not rec:
+            continue
+        _emit_with_addrs(row[0], rec, row[1], row[2], 'AKA',
+                          row[5], row[6],
+                          row[7], row[8], None,
+                          None, None, None)
+
+    # ---- Org primary name (gate: WordNumberMatchingJaroWinkler >= 1) ----
+    org_rows = cur.execute(f"""
+        SELECT Input_Record_ID, SDN_UID,
+               SourceOrgName, SDNOrgName,
+               FullName_JaroWinklerSimilarity,
+               SourceNumberofWords, SDNNumberofWords, WordNumberMatchingJaroWinkler
+        FROM   [{schema}].[MatchingResults_OrgName]
+        WHERE  Run_ID = ? AND WordNumberMatchingJaroWinkler >= 1
+    """, [run_id]).fetchall()
+    for row in org_rows:
+        rec = rec_by_id.get(row[0])
+        if not rec:
+            continue
+        _emit_with_addrs(row[0], rec, row[1], None, 'Regular',
+                          None, None, None, None, row[4],
+                          row[5], row[6], row[7])
+
+    # ---- Org AKA (gate: WordNumberMatchingJaroWinkler >= 1) ----
+    orgaka_rows = cur.execute(f"""
+        SELECT Input_Record_ID, SDN_UID, AKA_UID,
+               SourceOrgName, SDNOrgName,
+               FullName_JaroWinklerSimilarity,
+               SourceNumberofWords, SDNNumberofWords, WordNumberMatchingJaroWinkler
+        FROM   [{schema}].[MatchingResults_OrgName_AKA]
+        WHERE  Run_ID = ? AND WordNumberMatchingJaroWinkler >= 1
+    """, [run_id]).fetchall()
+    for row in orgaka_rows:
+        rec = rec_by_id.get(row[0])
+        if not rec:
+            continue
+        _emit_with_addrs(row[0], rec, row[1], row[2], 'AKA',
+                          None, None, None, None, row[5],
+                          row[6], row[7], row[8])
+
+    _flush()
+    return rows_written
+
+
 def main():
     ap = argparse.ArgumentParser(
         description="SDN matching v2 -- names + addresses, full-text + word-level"
@@ -4925,6 +5220,27 @@ def main():
         flush_addr_full_results(out_conn, s, addr_batch)
         total_addr_rows += len(addr_batch)
 
+        # Phase 3 — gate-passing audit rows with full address JW comparisons.
+        print("\nPhase 3 — building gate-passing audit table...")
+        rec_by_id = {i + 1: rec for i, rec in enumerate(input_records)}
+        # Build addr_by_sdn_uid from the addresses list loaded in Phase 1.
+        _addr_by_sdn_uid: dict = defaultdict(list)
+        for _a in addresses:
+            _addr_by_sdn_uid[_a.sdn_entry_uid].append(_a)
+        # Build a full SDN type map covering Individuals AND Entities for SDN_Type lookup.
+        all_sdn_type_map = {uid: (fn, ln, sdt) for uid, fn, ln, sdt in all_sdn_entries}
+        n_gp = _phase3_gate_passing(
+            out_conn       = out_conn,
+            schema         = s,
+            run_id         = run_id,
+            rec_by_id      = rec_by_id,
+            addr_by_sdn_uid= _addr_by_sdn_uid,
+            sdn_entry_map  = all_sdn_type_map,
+            pub_date       = pub_date,
+            run_ts         = None,
+        )
+        print(f"  Phase 3 complete: {n_gp:,} gate-passing rows written.")
+
     total_rows = (total_full_rows
                   + total_aka_rows
                   + total_org_rows
@@ -4949,6 +5265,7 @@ def main():
     print(f"  {total_no_match_rows:,} rows → MatchingResults_NoMatch  (input records with no match)")
     print(f"  {person_summary_rows:,} rows → Matching_Summary_Person")
     print(f"  {org_summary_rows:,} rows → Matching_Summary_Org")
+    print(f"  {n_gp:,} rows → MatchingResults_GatePassing")
 
 
 if __name__ == '__main__':
