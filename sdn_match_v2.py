@@ -4335,14 +4335,17 @@ def _phase3_gate_passing(out_conn, schema: str, run_id: int,
                           row[7], row[8], None,
                           None, None, None)
 
-    # ---- Org primary name (gate: WordNumberMatchingJaroWinkler >= 1) ----
+    # ---- Org primary name gate:
+    #      1-word SDN org -> at least 1 word must match
+    #      2+-word SDN org -> at least 2 words must match
     org_rows = cur.execute(f"""
         SELECT Input_Record_ID, SDN_UID,
                SourceOrgName, SDNOrgName,
                FullName_JaroWinklerSimilarity,
                SourceNumberofWords, SDNNumberofWords, WordNumberMatchingJaroWinkler
         FROM   [{schema}].[MatchingResults_OrgName]
-        WHERE  Run_ID = ? AND WordNumberMatchingJaroWinkler >= 1
+        WHERE  Run_ID = ?
+          AND  WordNumberMatchingJaroWinkler >= CASE WHEN SDNNumberofWords = 1 THEN 1 ELSE 2 END
     """, [run_id]).fetchall()
     for row in org_rows:
         rec = rec_by_id.get(row[0])
@@ -4352,14 +4355,15 @@ def _phase3_gate_passing(out_conn, schema: str, run_id: int,
                           None, None, None, None, row[4],
                           row[5], row[6], row[7])
 
-    # ---- Org AKA (gate: WordNumberMatchingJaroWinkler >= 1) ----
+    # ---- Org AKA gate (same rule as primary) ----
     orgaka_rows = cur.execute(f"""
         SELECT Input_Record_ID, SDN_UID, AKA_UID,
                SourceOrgName, SDNOrgName,
                FullName_JaroWinklerSimilarity,
                SourceNumberofWords, SDNNumberofWords, WordNumberMatchingJaroWinkler
         FROM   [{schema}].[MatchingResults_OrgName_AKA]
-        WHERE  Run_ID = ? AND WordNumberMatchingJaroWinkler >= 1
+        WHERE  Run_ID = ?
+          AND  WordNumberMatchingJaroWinkler >= CASE WHEN SDNNumberofWords = 1 THEN 1 ELSE 2 END
     """, [run_id]).fetchall()
     for row in orgaka_rows:
         rec = rec_by_id.get(row[0])
