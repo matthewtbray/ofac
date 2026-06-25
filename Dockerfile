@@ -24,6 +24,7 @@ COPY download_sdn_xml.py \
      sdn_match.py \
      sdn_match_v2.py \
      sdn_match_v2.cfg \
+     score_gate_passing.py \
      export_results.py \
      import_screening_xlsx.py \
      create_report_view.sql \

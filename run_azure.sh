@@ -49,7 +49,7 @@ fi
 
 # ---- Step 1: Download SDN.XML from OFAC --------------------------------
 echo ""
-echo "[1/4] Downloading SDN.XML from OFAC..."
+echo "[1/6] Downloading SDN.XML from OFAC..."
 python /app/download_sdn_xml.py \
     --output      "$SDN_XML" \
     --upload-blob \
@@ -57,7 +57,7 @@ python /app/download_sdn_xml.py \
 
 # ---- Step 2: Import SDN.XML into Azure SQL SDN database ----------------
 echo ""
-echo "[2/5] Importing SDN.XML into [$SQL_SERVER].[$SDN_DB]..."
+echo "[2/6] Importing SDN.XML into [$SQL_SERVER].[$SDN_DB]..."
 python /app/xml_import.py \
     --xml      "$SDN_XML" \
     --server   "$SQL_SERVER" \
@@ -68,7 +68,7 @@ python /app/xml_import.py \
 # Scans the blob container for the most recent Delaware OFAC List-*.xlsx.
 # Silently skips if no file is found (ScreeningInput remains unchanged).
 echo ""
-echo "[3/5] Importing screening list from blob (container: $STORAGE_CONTAINER)..."
+echo "[3/6] Importing screening list from blob (container: $STORAGE_CONTAINER)..."
 python /app/import_screening_xlsx.py \
     --server   "$SQL_SERVER" \
     --database "$SDN_DB" \
@@ -76,7 +76,7 @@ python /app/import_screening_xlsx.py \
 
 # ---- Step 4: Run SDN matching ------------------------------------------
 echo ""
-echo "[4/5] Running SDN matching (limit: $SDN_LIMIT)..."
+echo "[4/6] Running SDN matching (limit: $SDN_LIMIT)..."
 
 _run_match() {
     python /app/sdn_match_v2.py \
@@ -96,9 +96,17 @@ worker_args=""
 # shellcheck disable=SC2086
 _run_match $limit_args $dummy_args $worker_args
 
-# ---- Step 5: Export results to blob and truncate -----------------------
+# ---- Step 5: Score gate-passing rows -----------------------------------
 echo ""
-echo "[5/5] Exporting results to blob / truncating..."
+echo "[5/6] Scoring gate-passing rows (100-pt composite)..."
+python /app/score_gate_passing.py \
+    --last-run \
+    --out-server   "$SQL_SERVER" --out-database "$OUT_DB" \
+    --sdn-server   "$SQL_SERVER" --sdn-database "$SDN_DB"
+
+# ---- Step 6: Export results to blob and truncate -----------------------
+echo ""
+echo "[6/6] Exporting results to blob / truncating..."
 python /app/export_results.py \
     --out-server        "$SQL_SERVER" --out-database "$OUT_DB" \
     --sdn-server        "$SQL_SERVER" --sdn-database "$SDN_DB" \

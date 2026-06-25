@@ -1349,8 +1349,17 @@ def setup_output_tables(conn, schema: str, drop: bool):
     cur.execute(_DDL_SUMMARY_ORG.replace('{s}', schema))
     # Gate-passing audit table (no FK dependencies on RunLog)
     cur.execute(_DDL_GATE_PASSING.replace('{s}', schema))
+    cur.execute(_DDL_GATE_PASSING_MIGRATE.replace('{s}', schema))
+    # Scoring weights config (idempotent CREATE + seed)
+    cur.execute(_DDL_SCORING_WEIGHTS.replace('{s}', schema))
+    # Org NoMatch tables (create if absent; migrate columns added in this release)
+    cur.execute(_DDL_ORG_NO_MATCH.replace('{s}', schema))
+    cur.execute(_DDL_ORG_NO_MATCH_MIGRATE.replace('{s}', schema))
+    cur.execute(_DDL_ORG_AKA_NO_MATCH.replace('{s}', schema))
+    cur.execute(_DDL_ORG_AKA_NO_MATCH_MIGRATE.replace('{s}', schema))
     conn.commit()
     seed_addr_match_types(conn, schema)
+    seed_scoring_weights(conn, schema)
 
 
 # ---------------------------------------------------------------------------
@@ -2154,7 +2163,10 @@ BEGIN
         Run_ID                         INT           NOT NULL,
         Input_Record_ID                BIGINT        NOT NULL,
         SDN_UID                        INT           NOT NULL,
-        FullName_JaroWinklerSimilarity DECIMAL(5,2)  NOT NULL CONSTRAINT DF_MRORGDNM_JW DEFAULT 0,
+        FullName_JaroWinklerSimilarity DECIMAL(5,2)  NOT NULL CONSTRAINT DF_MRORGDNM_JW    DEFAULT 0,
+        SourceNumberofWords            INT           NOT NULL CONSTRAINT DF_MRORGDNM_SrcWC DEFAULT 0,
+        SDNNumberofWords               INT           NOT NULL CONSTRAINT DF_MRORGDNM_SdnWC DEFAULT 0,
+        WordNumberMatchingJaroWinkler  INT           NOT NULL CONSTRAINT DF_MRORGDNM_JWM   DEFAULT 0,
         CONSTRAINT PK_MatchingResults_OrgName_NoMatch PRIMARY KEY (NoMatch_ID),
         CONSTRAINT FK_MRORGDNM_RunLog FOREIGN KEY (Run_ID)
             REFERENCES [{s}].[MatchingResults_v2_RunLog] (run_id)
@@ -2162,14 +2174,34 @@ BEGIN
     CREATE INDEX IX_MRORGDNM_Run         ON [{s}].[MatchingResults_OrgName_NoMatch] (Run_ID);
     CREATE INDEX IX_MRORGDNM_InputRecord ON [{s}].[MatchingResults_OrgName_NoMatch] (Input_Record_ID);
     CREATE INDEX IX_MRORGDNM_SDN         ON [{s}].[MatchingResults_OrgName_NoMatch] (SDN_UID);
+    CREATE INDEX IX_MRORGDNM_WC          ON [{s}].[MatchingResults_OrgName_NoMatch] (Run_ID, WordNumberMatchingJaroWinkler, SDNNumberofWords);
+END;
+"""
+
+# Migrate existing tables created before word-count columns were added.
+_DDL_ORG_NO_MATCH_MIGRATE = """
+IF OBJECT_ID(N'[{s}].[MatchingResults_OrgName_NoMatch]', N'U') IS NOT NULL
+  AND NOT EXISTS (
+    SELECT 1 FROM sys.columns
+    WHERE object_id = OBJECT_ID(N'[{s}].[MatchingResults_OrgName_NoMatch]')
+      AND name = N'SDNNumberofWords')
+BEGIN
+    ALTER TABLE [{s}].[MatchingResults_OrgName_NoMatch]
+        ADD SourceNumberofWords           INT NOT NULL CONSTRAINT DF_MRORGDNM_SrcWC DEFAULT 0,
+            SDNNumberofWords              INT NOT NULL CONSTRAINT DF_MRORGDNM_SdnWC DEFAULT 0,
+            WordNumberMatchingJaroWinkler INT NOT NULL CONSTRAINT DF_MRORGDNM_JWM   DEFAULT 0;
+    CREATE INDEX IX_MRORGDNM_WC ON [{s}].[MatchingResults_OrgName_NoMatch]
+        (Run_ID, WordNumberMatchingJaroWinkler, SDNNumberofWords);
 END;
 """
 
 _ORG_NO_MATCH_INSERT_SQL = """
 INSERT INTO [{s}].[MatchingResults_OrgName_NoMatch]
-    (Run_ID, Input_Record_ID, SDN_UID, FullName_JaroWinklerSimilarity)
-VALUES (?,?,?,?)
-"""  # 4 placeholders
+    (Run_ID, Input_Record_ID, SDN_UID,
+     FullName_JaroWinklerSimilarity,
+     SourceNumberofWords, SDNNumberofWords, WordNumberMatchingJaroWinkler)
+VALUES (?,?,?,?,?,?,?)
+"""  # 7 placeholders
 
 # ---------------------------------------------------------------------------
 # MatchingResults_OrgName_AKA  DDL + flush
@@ -2233,8 +2265,13 @@ BEGIN
         Run_ID                         INT           NOT NULL,
         Input_Record_ID                BIGINT        NOT NULL,
         SDN_UID                        INT           NOT NULL,
+        AKA_UID                        INT           NULL,
+        AKA_Category                   VARCHAR(50)   NULL,
         SDNOrgName                     VARCHAR(900)  NULL,
-        FullName_JaroWinklerSimilarity DECIMAL(5,2)  NOT NULL CONSTRAINT DF_MRORGAKANM_JW DEFAULT 0,
+        FullName_JaroWinklerSimilarity DECIMAL(5,2)  NOT NULL CONSTRAINT DF_MRORGAKANM_JW    DEFAULT 0,
+        SourceNumberofWords            INT           NOT NULL CONSTRAINT DF_MRORGAKANM_SrcWC DEFAULT 0,
+        SDNNumberofWords               INT           NOT NULL CONSTRAINT DF_MRORGAKANM_SdnWC DEFAULT 0,
+        WordNumberMatchingJaroWinkler  INT           NOT NULL CONSTRAINT DF_MRORGAKANM_JWM   DEFAULT 0,
         CONSTRAINT PK_MatchingResults_OrgName_AKA_NoMatch PRIMARY KEY (NoMatch_ID),
         CONSTRAINT FK_MRORGAKANM_RunLog FOREIGN KEY (Run_ID)
             REFERENCES [{s}].[MatchingResults_v2_RunLog] (run_id)
@@ -2242,14 +2279,36 @@ BEGIN
     CREATE INDEX IX_MRORGAKANM_Run         ON [{s}].[MatchingResults_OrgName_AKA_NoMatch] (Run_ID);
     CREATE INDEX IX_MRORGAKANM_InputRecord ON [{s}].[MatchingResults_OrgName_AKA_NoMatch] (Input_Record_ID);
     CREATE INDEX IX_MRORGAKANM_SDN         ON [{s}].[MatchingResults_OrgName_AKA_NoMatch] (SDN_UID);
+    CREATE INDEX IX_MRORGAKANM_WC          ON [{s}].[MatchingResults_OrgName_AKA_NoMatch] (Run_ID, WordNumberMatchingJaroWinkler, SDNNumberofWords);
+END;
+"""
+
+# Migrate existing tables created before word-count / AKA columns were added.
+_DDL_ORG_AKA_NO_MATCH_MIGRATE = """
+IF OBJECT_ID(N'[{s}].[MatchingResults_OrgName_AKA_NoMatch]', N'U') IS NOT NULL
+  AND NOT EXISTS (
+    SELECT 1 FROM sys.columns
+    WHERE object_id = OBJECT_ID(N'[{s}].[MatchingResults_OrgName_AKA_NoMatch]')
+      AND name = N'SDNNumberofWords')
+BEGIN
+    ALTER TABLE [{s}].[MatchingResults_OrgName_AKA_NoMatch]
+        ADD AKA_UID                       INT          NULL,
+            AKA_Category                  VARCHAR(50)  NULL,
+            SourceNumberofWords           INT          NOT NULL CONSTRAINT DF_MRORGAKANM_SrcWC DEFAULT 0,
+            SDNNumberofWords              INT          NOT NULL CONSTRAINT DF_MRORGAKANM_SdnWC DEFAULT 0,
+            WordNumberMatchingJaroWinkler INT          NOT NULL CONSTRAINT DF_MRORGAKANM_JWM   DEFAULT 0;
+    CREATE INDEX IX_MRORGAKANM_WC ON [{s}].[MatchingResults_OrgName_AKA_NoMatch]
+        (Run_ID, WordNumberMatchingJaroWinkler, SDNNumberofWords);
 END;
 """
 
 _ORG_AKA_NO_MATCH_INSERT_SQL = """
 INSERT INTO [{s}].[MatchingResults_OrgName_AKA_NoMatch]
-    (Run_ID, Input_Record_ID, SDN_UID, SDNOrgName, FullName_JaroWinklerSimilarity)
-VALUES (?,?,?,?,?)
-"""  # 5 placeholders
+    (Run_ID, Input_Record_ID, SDN_UID, AKA_UID, AKA_Category,
+     SDNOrgName, FullName_JaroWinklerSimilarity,
+     SourceNumberofWords, SDNNumberofWords, WordNumberMatchingJaroWinkler)
+VALUES (?,?,?,?,?,?,?,?,?,?)
+"""  # 10 placeholders
 
 
 # ---------------------------------------------------------------------------
@@ -2379,9 +2438,15 @@ BEGIN
         OrgName_Input_WordCount INT            NULL,
         OrgName_SDN_WordCount   INT            NULL,
         OrgName_Match_WordCount INT            NULL,
-        Processing_Timestamp    DATETIME       NOT NULL DEFAULT GETDATE(),
-        SDN_List_Version_Date   DATETIME       NULL,
-        MatchDisposition        DECIMAL(5,2)   NULL,
+        Processing_Timestamp     DATETIME       NOT NULL DEFAULT GETDATE(),
+        SDN_List_Version_Date    DATETIME       NULL,
+        MatchDisposition         DECIMAL(5,2)   NULL,
+        Score_NameSimilarity     DECIMAL(5,2)   NULL,
+        Score_NameContext        DECIMAL(5,2)   NULL,
+        Score_EntityType         DECIMAL(5,2)   NULL,
+        Score_Address            DECIMAL(5,2)   NULL,
+        Score_Country            DECIMAL(5,2)   NULL,
+        Score_TokenMatchCategory VARCHAR(20)    NULL,
         CONSTRAINT PK_MatchingResults_GatePassing PRIMARY KEY (GatePassing_ID)
     );
     CREATE INDEX IX_GP_Run         ON [{s}].[MatchingResults_GatePassing] (Run_ID);
@@ -2391,6 +2456,84 @@ BEGIN
     CREATE INDEX IX_GP_Entity      ON [{s}].[MatchingResults_GatePassing] (Entity_ID);
 END;
 """
+
+# Migrate: add score columns to existing GatePassing tables.
+_DDL_GATE_PASSING_MIGRATE = """
+IF OBJECT_ID(N'[{s}].[MatchingResults_GatePassing]', N'U') IS NOT NULL
+  AND NOT EXISTS (
+    SELECT 1 FROM sys.columns
+    WHERE object_id = OBJECT_ID(N'[{s}].[MatchingResults_GatePassing]')
+      AND name = N'Score_NameSimilarity')
+BEGIN
+    ALTER TABLE [{s}].[MatchingResults_GatePassing]
+        ADD Score_NameSimilarity     DECIMAL(5,2) NULL,
+            Score_NameContext        DECIMAL(5,2) NULL,
+            Score_EntityType         DECIMAL(5,2) NULL,
+            Score_Address            DECIMAL(5,2) NULL,
+            Score_Country            DECIMAL(5,2) NULL,
+            Score_TokenMatchCategory VARCHAR(20)  NULL;
+END;
+"""
+
+# ---------------------------------------------------------------------------
+# ScoringWeights  DDL + seed
+# Configurable weights for the 100-pt composite score computed by
+# score_gate_passing.py.  Stored in the output (SDNReporting) database so
+# the client can adjust values without a code deployment.
+# ---------------------------------------------------------------------------
+
+_DDL_SCORING_WEIGHTS = """
+IF OBJECT_ID(N'[{s}].[ScoringWeights]', N'U') IS NULL
+CREATE TABLE [{s}].[ScoringWeights] (
+    Weight_Key   VARCHAR(50)   NOT NULL CONSTRAINT PK_ScoringWeights PRIMARY KEY,
+    Weight_Value DECIMAL(7,2)  NOT NULL,
+    Description  VARCHAR(200)  NULL
+);
+"""
+
+_SCORING_WEIGHTS_SEED = [
+    # ---- Name Similarity (0-60) ------------------------------------------
+    ('NameSimilarity_Max',          60,  'Maximum points for name similarity category'),
+    ('TokenMatch_All',              20,  'Org: all tokens match (order-irrelevant)'),
+    ('TokenMatch_FirstLast_Min',    16,  'Org: first+last+core tokens match — lower bound'),
+    ('TokenMatch_FirstLast_Max',    18,  'Org: first+last+core tokens match — upper bound'),
+    ('TokenMatch_Majority_Min',     10,  'Org: majority of tokens match — lower bound'),
+    ('TokenMatch_Majority_Max',     15,  'Org: majority of tokens match — upper bound'),
+    ('TokenMatch_Minority_Min',      5,  'Org: minority of tokens match — lower bound'),
+    ('TokenMatch_Minority_Max',      9,  'Org: minority of tokens match — upper bound'),
+    ('FuzzyMatch_Max',              40,  'Org: full-string JW component maximum'),
+    # ---- Name Context (0-5) ----------------------------------------------
+    ('NameContext_Primary',          5,  'Match on primary SDN name'),
+    ('NameContext_StrongAKA',        4,  'Match on strong AKA name'),
+    ('NameContext_WeakAKA',          2,  'Match on weak AKA name'),
+    # ---- Entity Type (0 or 10) -------------------------------------------
+    ('EntityType_Match',            10,  'Points when input type == SDN type (Individual/Entity)'),
+    # ---- Address (0-15) --------------------------------------------------
+    ('Address_Full',                15,  'Full address JW >= threshold'),
+    ('Address_CityCountry_Min',     10,  'City+Country JW at threshold — lower bound'),
+    ('Address_CityCountry_Max',     12,  'City+Country JW = 100 — upper bound'),
+    ('Address_RegionCountry_Min',    6,  'Region+Country JW at threshold — lower bound'),
+    ('Address_RegionCountry_Max',    9,  'Region+Country JW = 100 — upper bound'),
+    ('Address_Country_Min',          3,  'Country JW at threshold — lower bound'),
+    ('Address_Country_Max',          5,  'Country JW = 100 — upper bound'),
+    ('Address_JW_Threshold',        85,  'Minimum JW % to qualify for any address tier'),
+    # ---- Country (0-10) --------------------------------------------------
+    ('Country_Full',                10,  'Country JW = 100 (exact match)'),
+    # ---- Internal thresholds ---------------------------------------------
+    ('WordMatch_JW_Threshold',      75,  'JW % threshold for word-level token matching'),
+]
+
+
+def seed_scoring_weights(conn, schema: str):
+    """Insert default ScoringWeights rows; skip rows that already exist."""
+    cur = conn.cursor()
+    sql = (f"IF NOT EXISTS (SELECT 1 FROM [{schema}].[ScoringWeights] WHERE Weight_Key=?) "
+           f"INSERT INTO [{schema}].[ScoringWeights] (Weight_Key,Weight_Value,Description) "
+           f"VALUES (?,?,?)")
+    for key, val, desc in _SCORING_WEIGHTS_SEED:
+        cur.execute(sql, [key, key, val, desc])
+    conn.commit()
+
 
 # ---------------------------------------------------------------------------
 # MatchingResults_Address_NoMatch  DDL + flush
@@ -3076,6 +3219,15 @@ def _score_aka(fn_nm: str, ln_nm: str,
     return [fn_jw, ln_jw]
 
 
+# Coordinating conjunctions (FANBOYS) and articles stripped from BOTH sides
+# after entity-type expansion, before word counting.  Full-string JW is still
+# computed on the unstripped names.
+_ORG_STOP_WORDS = frozenset({
+    'for', 'and', 'nor', 'but', 'or', 'yet', 'so',  # FANBOYS
+    'the', 'a', 'an',                                 # articles
+})
+
+
 def score_org_name(src_nm: str, sdn_nm: str,
                    jw_threshold: float,
                    word_match: bool = True,
@@ -3133,6 +3285,10 @@ def score_org_name(src_nm: str, sdn_nm: str,
     else:
         src_words = src_lower.split()
         sdn_words = sdn_lower.split()
+
+    # Remove coordinating conjunctions and articles before word counting.
+    src_words = [w for w in src_words if w not in _ORG_STOP_WORDS]
+    sdn_words = [w for w in sdn_words if w not in _ORG_STOP_WORDS]
 
     if not src_words or not sdn_words or not word_match:
         return len(src_words), len(sdn_words), 0, full_jw
@@ -4111,13 +4267,19 @@ def _precompute_duckdb(
 
         # ---- Initialise cache entries -----------------------------------
         for key in unique_entity_keys:
-            entity_name_cache[key] = {'org': [], 'org_aka': [], 'has_full': False}
+            entity_name_cache[key] = {
+                'org': [], 'org_aka': [],
+                'no_match_org': [], 'no_match_aka': [],
+                'has_full': False,
+            }
 
         # ---- Helper: word-level JW counts (for matched pairs only) -----
         def _word_counts(src_nm: str, sdn_nm: str) -> tuple:
-            """Return (src_wc, sdn_wc, jw_m) for an already-matched pair."""
-            src_words = src_nm.lower().split() if src_nm else []
-            sdn_words = sdn_nm.lower().split() if sdn_nm else []
+            """Return (src_wc, sdn_wc, jw_m) after stop-word filtering."""
+            src_words = [w for w in (src_nm.lower().split() if src_nm else [])
+                         if w not in _ORG_STOP_WORDS]
+            sdn_words = [w for w in (sdn_nm.lower().split() if sdn_nm else [])
+                         if w not in _ORG_STOP_WORDS]
             if not run_org_word_match or not src_words or not sdn_words:
                 return len(src_words), len(sdn_words), 0
             jw_m = sum(
@@ -4133,6 +4295,11 @@ def _precompute_duckdb(
             src_wc, sdn_wc, jw_m = _word_counts(entity_nm, norm_nm)
             if not _entity_match_gate_v2(entity_nm, norm_nm, src_wc, sdn_wc, jw_m,
                                           full_jw, jw_org_threshold, entity_map):
+                # Still capture for address gating if word count threshold is met.
+                _wg = 1 if sdn_wc == 1 else 2
+                if jw_m >= _wg:
+                    entity_name_cache[entity_nm]['no_match_org'].append(
+                        (uid, raw_nm, norm_nm, src_wc, sdn_wc, jw_m, full_jw))
                 continue
             entry = entity_name_cache[entity_nm]
             entry['org'].append(
@@ -4145,6 +4312,11 @@ def _precompute_duckdb(
             src_wc, sdn_wc, jw_m = _word_counts(entity_nm, norm_nm)
             if not _entity_match_gate_v2(entity_nm, norm_nm, src_wc, sdn_wc, jw_m,
                                           full_jw, jw_org_aka_threshold, entity_map):
+                _wg = 1 if sdn_wc == 1 else 2
+                if jw_m >= _wg:
+                    entity_name_cache[entity_nm]['no_match_aka'].append(
+                        (suid, auid, acat, raw_nm, norm_nm,
+                         src_wc, sdn_wc, jw_m, full_jw))
                 continue
             entry = entity_name_cache[entity_nm]
             entry['org_aka'].append(
@@ -4335,43 +4507,57 @@ def _phase3_gate_passing(out_conn, schema: str, run_id: int,
                           row[7], row[8], None,
                           None, None, None)
 
-    # ---- Org primary name gate:
+    # ---- Org primary name gate (word-count only):
     #      1-word SDN org -> at least 1 word must match
     #      2+-word SDN org -> at least 2 words must match
+    #      Union with NoMatch table to capture pairs below the full JW gate
+    #      but still meeting the word-count threshold.
     org_rows = cur.execute(f"""
         SELECT Input_Record_ID, SDN_UID,
-               SourceOrgName, SDNOrgName,
                FullName_JaroWinklerSimilarity,
                SourceNumberofWords, SDNNumberofWords, WordNumberMatchingJaroWinkler
         FROM   [{schema}].[MatchingResults_OrgName]
         WHERE  Run_ID = ?
           AND  WordNumberMatchingJaroWinkler >= CASE WHEN SDNNumberofWords = 1 THEN 1 ELSE 2 END
-    """, [run_id]).fetchall()
+        UNION ALL
+        SELECT Input_Record_ID, SDN_UID,
+               FullName_JaroWinklerSimilarity,
+               SourceNumberofWords, SDNNumberofWords, WordNumberMatchingJaroWinkler
+        FROM   [{schema}].[MatchingResults_OrgName_NoMatch]
+        WHERE  Run_ID = ?
+          AND  WordNumberMatchingJaroWinkler >= CASE WHEN SDNNumberofWords = 1 THEN 1 ELSE 2 END
+    """, [run_id, run_id]).fetchall()
     for row in org_rows:
         rec = rec_by_id.get(row[0])
         if not rec:
             continue
         _emit_with_addrs(row[0], rec, row[1], None, 'Regular',
-                          None, None, None, None, row[4],
-                          row[5], row[6], row[7])
+                          None, None, None, None, row[2],
+                          row[3], row[4], row[5])
 
     # ---- Org AKA gate (same rule as primary) ----
     orgaka_rows = cur.execute(f"""
         SELECT Input_Record_ID, SDN_UID, AKA_UID,
-               SourceOrgName, SDNOrgName,
                FullName_JaroWinklerSimilarity,
                SourceNumberofWords, SDNNumberofWords, WordNumberMatchingJaroWinkler
         FROM   [{schema}].[MatchingResults_OrgName_AKA]
         WHERE  Run_ID = ?
           AND  WordNumberMatchingJaroWinkler >= CASE WHEN SDNNumberofWords = 1 THEN 1 ELSE 2 END
-    """, [run_id]).fetchall()
+        UNION ALL
+        SELECT Input_Record_ID, SDN_UID, AKA_UID,
+               FullName_JaroWinklerSimilarity,
+               SourceNumberofWords, SDNNumberofWords, WordNumberMatchingJaroWinkler
+        FROM   [{schema}].[MatchingResults_OrgName_AKA_NoMatch]
+        WHERE  Run_ID = ?
+          AND  WordNumberMatchingJaroWinkler >= CASE WHEN SDNNumberofWords = 1 THEN 1 ELSE 2 END
+    """, [run_id, run_id]).fetchall()
     for row in orgaka_rows:
         rec = rec_by_id.get(row[0])
         if not rec:
             continue
         _emit_with_addrs(row[0], rec, row[1], row[2], 'AKA',
-                          None, None, None, None, row[5],
-                          row[6], row[7], row[8])
+                          None, None, None, None, row[3],
+                          row[4], row[5], row[6])
 
     _flush()
     return rows_written
@@ -4741,12 +4927,14 @@ def main():
     # -----------------------------------------------------------------------
     print("Phase 1 — name / entity / linked-to / phone comparison ...")
     with pyodbc.connect(out_cs) as out_conn:
-        full_batch:      list = []
-        aka_batch:       list = []
-        org_batch:       list = []
-        org_aka_batch:   list = []
-        linked_to_batch: list = []
-        phone_batch:     list = []
+        full_batch:           list = []
+        aka_batch:            list = []
+        org_batch:            list = []
+        org_aka_batch:        list = []
+        org_no_match_batch:   list = []
+        org_aka_no_match_batch: list = []
+        linked_to_batch:      list = []
+        phone_batch:          list = []
         unmatched_records: list = []   # (input_record_id, rec) for records with no match
 
         # Scoring caches for Passes 5 & 6 (Passes 1-3b pre-populated above).
@@ -4855,7 +5043,8 @@ def main():
 
                 if entity_key not in entity_name_cache:
                     # Pass 3 — Entity sdnEntry full cross-comparison; JW threshold
-                    _p3_org: list = []
+                    _p3_org:        list = []
+                    _p3_no_match:   list = []
                     for _uid, (_sdn_raw, _sdn_nm) in entity_org_map.items():
                         _sc = score_org_name(
                             src_org, _sdn_nm,
@@ -4865,9 +5054,17 @@ def main():
                         if _entity_match_gate_v2(src_org, _sdn_nm, *_sc, jw_org_threshold,
                                                  entity_map):
                             _p3_org.append((_uid, _sdn_raw, _sdn_nm) + tuple(_sc))
+                        else:
+                            _src_wc, _sdn_wc, _jw_m, _full_jw = _sc
+                            _wg = 1 if _sdn_wc == 1 else 2
+                            if _jw_m >= _wg:
+                                _p3_no_match.append(
+                                    (_uid, _sdn_raw, _sdn_nm,
+                                     _src_wc, _sdn_wc, _jw_m, _full_jw))
 
                     # Pass 3b — Entity AKA full cross-comparison
-                    _p3b_aka: list = []
+                    _p3b_aka:       list = []
+                    _p3b_no_match:  list = []
                     for (_suid, _auid), (_araw, _anm, _acat) in \
                             entity_aka_norm.items():
                         _sc = score_org_name(
@@ -4880,10 +5077,19 @@ def main():
                             _p3b_aka.append(
                                 (_suid, _auid, _s(_acat), _araw, _anm)
                                 + tuple(_sc))
+                        else:
+                            _src_wc, _sdn_wc, _jw_m, _full_jw = _sc
+                            _wg = 1 if _sdn_wc == 1 else 2
+                            if _jw_m >= _wg:
+                                _p3b_no_match.append(
+                                    (_suid, _auid, _s(_acat), _araw, _anm,
+                                     _src_wc, _sdn_wc, _jw_m, _full_jw))
 
                     entity_name_cache[entity_key] = {
-                        'org':      _p3_org,
-                        'org_aka':  _p3b_aka,
+                        'org':          _p3_org,
+                        'org_aka':      _p3b_aka,
+                        'no_match_org': _p3_no_match,
+                        'no_match_aka': _p3b_no_match,
                         'has_full': bool(_p3_org) or bool(_p3b_aka),
                     }
 
@@ -4910,6 +5116,24 @@ def main():
                         _row[0], _row[1], _row[2],
                         _row[3], _row[4], 'Entity', 'akaList',
                         *_row[5:],
+                    ))
+
+                # Fan out NoMatch org (word-count passes, full gate did not)
+                for _row in _ec.get('no_match_org', []):
+                    # row = (uid, raw_nm, norm_nm, src_wc, sdn_wc, jw_m, full_jw)
+                    org_no_match_batch.append((
+                        run_id, input_record_id, _row[0],
+                        _row[6], _row[3], _row[4], _row[5],
+                    ))
+
+                # Fan out NoMatch AKA
+                for _row in _ec.get('no_match_aka', []):
+                    # row = (suid, auid, acat, raw_nm, norm_nm,
+                    #         src_wc, sdn_wc, jw_m, full_jw)
+                    org_aka_no_match_batch.append((
+                        run_id, input_record_id, _row[0],
+                        _row[1], _row[2], _row[3],
+                        _row[8], _row[5], _row[6], _row[7],
                     ))
 
             # ---------------------------------------------------------------
@@ -5053,6 +5277,8 @@ def main():
                 flush_aka_results(out_conn, s, aka_batch)
                 flush_org_results(out_conn, s, org_batch)
                 flush_org_aka_results(out_conn, s, org_aka_batch)
+                flush_org_no_match(out_conn, s, org_no_match_batch)
+                flush_org_aka_no_match(out_conn, s, org_aka_no_match_batch)
                 flush_linked_to_results(out_conn, s, linked_to_batch)
                 flush_phone_results(out_conn, s, phone_batch)
                 total_full_rows      += len(full_batch)
@@ -5061,12 +5287,14 @@ def main():
                 total_org_aka_rows   += len(org_aka_batch)
                 total_linked_to_rows += len(linked_to_batch)
                 total_phone_rows     += len(phone_batch)
-                full_batch      = []
-                aka_batch       = []
-                org_batch       = []
-                org_aka_batch   = []
-                linked_to_batch = []
-                phone_batch     = []
+                full_batch             = []
+                aka_batch              = []
+                org_batch              = []
+                org_aka_batch          = []
+                org_no_match_batch     = []
+                org_aka_no_match_batch = []
+                linked_to_batch        = []
+                phone_batch            = []
                 print(f"  Phase 1: {processed:,} / {n_input:,}  "
                       f"{total_full_rows:,} match  "
                       f"{total_aka_rows:,} AKA  "
@@ -5085,6 +5313,8 @@ def main():
         flush_aka_results(out_conn, s, aka_batch)
         flush_org_results(out_conn, s, org_batch)
         flush_org_aka_results(out_conn, s, org_aka_batch)
+        flush_org_no_match(out_conn, s, org_no_match_batch)
+        flush_org_aka_no_match(out_conn, s, org_aka_no_match_batch)
         flush_linked_to_results(out_conn, s, linked_to_batch)
         flush_phone_results(out_conn, s, phone_batch)
         total_full_rows      += len(full_batch)
