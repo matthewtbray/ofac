@@ -2492,16 +2492,16 @@ CREATE TABLE [{s}].[ScoringWeights] (
 """
 
 _SCORING_WEIGHTS_SEED = [
-    # ---- Name Similarity (0-45) ------------------------------------------
+    # ---- Name Similarity (0-45): orgs=30 word+15 fuzzy; individuals=45 JW avg
     ('NameSimilarity_Max',          45,   'Maximum points for name similarity category'),
-    ('TokenMatch_All',              15,   'Org: all tokens match (order-irrelevant)'),
-    ('TokenMatch_FirstLast_Min',    12,   'Org: first+last+core tokens match — lower bound'),
-    ('TokenMatch_FirstLast_Max',    13.5, 'Org: first+last+core tokens match — upper bound'),
-    ('TokenMatch_Majority_Min',      7.5, 'Org: majority of tokens match — lower bound'),
-    ('TokenMatch_Majority_Max',     11.25,'Org: majority of tokens match — upper bound'),
-    ('TokenMatch_Minority_Min',      3.75,'Org: minority of tokens match — lower bound'),
-    ('TokenMatch_Minority_Max',      6.75,'Org: minority of tokens match — upper bound'),
-    ('FuzzyMatch_Max',              30,   'Org: full-string JW component maximum'),
+    ('TokenMatch_All',              30,   'Org: all tokens match (order-irrelevant)'),
+    ('TokenMatch_FirstLast_Min',    24,   'Org: first+last+core tokens match — lower bound'),
+    ('TokenMatch_FirstLast_Max',    27,   'Org: first+last+core tokens match — upper bound'),
+    ('TokenMatch_Majority_Min',     15,   'Org: majority of tokens match — lower bound'),
+    ('TokenMatch_Majority_Max',     22.5, 'Org: majority of tokens match — upper bound'),
+    ('TokenMatch_Minority_Min',      7.5, 'Org: minority of tokens match — lower bound'),
+    ('TokenMatch_Minority_Max',     13.5, 'Org: minority of tokens match — upper bound'),
+    ('FuzzyMatch_Max',              15,   'Org: full-string JW component maximum'),
     # ---- Name Context (0-15) ---------------------------------------------
     ('NameContext_Primary',         15,   'Match on primary SDN name'),
     ('NameContext_StrongAKA',       12,   'Match on strong AKA name'),

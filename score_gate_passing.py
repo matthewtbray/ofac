@@ -66,16 +66,16 @@ def _conn_str(server: str, database: str) -> str:
 # ---------------------------------------------------------------------------
 
 _WEIGHT_DEFAULTS: dict = {
-    # Name Similarity (0-45)
+    # Name Similarity (0-45): orgs = 30 word match + 15 fuzzy; individuals = 45 JW avg
     'NameSimilarity_Max':        45.0,
-    'TokenMatch_All':            15.0,
-    'TokenMatch_FirstLast_Min':  12.0,
-    'TokenMatch_FirstLast_Max':  13.5,
-    'TokenMatch_Majority_Min':    7.5,
-    'TokenMatch_Majority_Max':   11.25,
-    'TokenMatch_Minority_Min':    3.75,
-    'TokenMatch_Minority_Max':    6.75,
-    'FuzzyMatch_Max':            30.0,
+    'TokenMatch_All':            30.0,
+    'TokenMatch_FirstLast_Min':  24.0,
+    'TokenMatch_FirstLast_Max':  27.0,
+    'TokenMatch_Majority_Min':   15.0,
+    'TokenMatch_Majority_Max':   22.5,
+    'TokenMatch_Minority_Min':    7.5,
+    'TokenMatch_Minority_Max':   13.5,
+    'FuzzyMatch_Max':            15.0,
     # Name Context (0-15)
     'NameContext_Primary':       15.0,
     'NameContext_StrongAKA':     12.0,
