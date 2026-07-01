@@ -1270,8 +1270,23 @@ CREATE TABLE [{s}].[MatchingInput_v2] (
     region_nm       NVARCHAR(100) NULL,
     postal_code_nm  VARCHAR(20)   NULL,
     country_nm      NVARCHAR(100) NULL,
+    contact_id      VARCHAR(255)  NULL,
+    entity_id       VARCHAR(255)  NULL,
     INDEX IX_MI_run (run_id)
 );
+"""
+
+_DDL_INPUT_MIGRATE = """
+IF OBJECT_ID(N'[{s}].[MatchingInput_v2]', N'U') IS NOT NULL
+  AND NOT EXISTS (
+    SELECT 1 FROM sys.columns
+    WHERE object_id = OBJECT_ID(N'[{s}].[MatchingInput_v2]')
+      AND name = N'contact_id')
+BEGIN
+    ALTER TABLE [{s}].[MatchingInput_v2]
+        ADD contact_id VARCHAR(255) NULL,
+            entity_id  VARCHAR(255) NULL;
+END;
 """
 
 _DDL_RESULTS = """
@@ -1307,6 +1322,8 @@ CREATE TABLE [{s}].[MatchingResults_v2] (
 def setup_output_tables(conn, schema: str, drop: bool):
     cur = conn.cursor()
     cur.execute(_DDL_RUNLOG.replace('{s}', schema))
+    cur.execute(_DDL_INPUT.replace('{s}', schema))
+    cur.execute(_DDL_INPUT_MIGRATE.replace('{s}', schema))
     if drop:
         # Drop MatchingResults_GatePassing (no FK dependencies)
         cur.execute(f"IF OBJECT_ID(N'[{schema}].[MatchingResults_GatePassing]', N'U') IS NOT NULL "
@@ -1614,9 +1631,9 @@ def insert_input_record(conn, schema: str, run_id: int,
         f"address1, address2, address3, city, region, postal_code, country, "
         f"entity_name_nm, first_name_nm, middle_name_nm, last_name_nm, "
         f"address1_nm, address2_nm, address3_nm, city_nm, region_nm, "
-        f"postal_code_nm, country_nm) "
+        f"postal_code_nm, country_nm, contact_id, entity_id) "
         f"OUTPUT INSERTED.input_id "
-        f"VALUES (?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?)",
+        f"VALUES (?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?)",
         [run_id,
          _s(rec.entity_type), _s(rec.entity_name),
          _s(rec.first_name), _s(rec.middle_name), _s(rec.last_name),
@@ -1624,7 +1641,8 @@ def insert_input_record(conn, schema: str, run_id: int,
          _s(rec.city), _s(rec.region), _s(rec.postal_code), _s(rec.country),
          rec.entity_name_nm, rec.first_name_nm, rec.middle_name_nm, rec.last_name_nm,
          rec.address1_nm, rec.address2_nm, rec.address3_nm,
-         rec.city_nm, rec.region_nm, rec.postal_code_nm, rec.country_nm]
+         rec.city_nm, rec.region_nm, rec.postal_code_nm, rec.country_nm,
+         _s(rec.contact_id), _s(rec.entity_id)]
     )
     return int(cur.fetchone()[0])
 

@@ -41,6 +41,7 @@ import os
 import subprocess
 import sys
 import tempfile
+import zipfile
 from datetime import datetime
 
 try:
@@ -60,8 +61,12 @@ EXPORT_TABLES = [
     'MatchingResults_Address',
     'MatchingResults_LinkedTo',
     'MatchingResults_Phone',
+    'MatchingResults_GatePassing',
     'MatchingResults_Report',
 ]
+
+# Tables whose GatePassing CSV also gets a Cold-tier copy in blob mode.
+COLD_COPY_TABLES = {'MatchingResults_GatePassing'}
 
 # ---------------------------------------------------------------------------
 # Tables to truncate after backup (all MatchingResults_* detail tables).
@@ -70,6 +75,7 @@ EXPORT_TABLES = [
 # MatchingResults_Report is a VIEW — nothing to truncate.
 # ---------------------------------------------------------------------------
 TRUNCATE_TABLES = [
+    'MatchingResults_GatePassing',
     'MatchingResults_Person_Full',
     'MatchingResults_Person_NoMatch',
     'MatchingResults_AKA',
@@ -299,13 +305,25 @@ class BlobOutput:
     def _blob(self, filename: str):
         return self._svc.get_blob_client(self._container, f"{self._prefix}{filename}")
 
-    def write_csv(self, filename: str, headers: list, rows: list):
+    def write_csv(self, filename: str, headers: list, rows: list,
+                  also_cold: bool = False):
         buf = io.StringIO()
         w = csv.writer(buf)
         w.writerow(headers)
         w.writerows(rows)
-        self._blob(filename).upload_blob(buf.getvalue().encode('utf-8'), overwrite=True)
+        data = buf.getvalue().encode('utf-8')
+        self._blob(filename).upload_blob(data, overwrite=True)
         print(f"  {filename:<60} {len(rows):>8,} rows")
+        if also_cold:
+            self.write_cold(f"cold/{filename}", data)
+
+    def write_cold(self, filename: str, data: bytes):
+        """Upload bytes to Cold blob tier."""
+        from azure.storage.blob import StandardBlobTier
+        bc = self._blob(filename)
+        bc.upload_blob(data, overwrite=True)
+        bc.set_standard_blob_tier(StandardBlobTier.Cold)
+        print(f"  {filename} (Cold)")
 
     def write_text(self, filename: str, content: str):
         self._blob(filename).upload_blob(content.encode('utf-8'), overwrite=True)
@@ -332,7 +350,7 @@ class BlobOutput:
 # ---------------------------------------------------------------------------
 
 def _export_table(conn, schema: str, table: str, run_id: int, output,
-                  order_by: str = None):
+                  order_by: str = None, also_cold: bool = False):
     cur = conn.cursor()
     sql = f"SELECT * FROM [{schema}].[{table}] WHERE Run_ID = ?"
     if order_by:
@@ -344,7 +362,7 @@ def _export_table(conn, schema: str, table: str, run_id: int, output,
         return
     headers = [d[0] for d in cur.description]
     rows    = cur.fetchall()
-    output.write_csv(f"{table}.csv", headers, rows)
+    output.write_csv(f"{table}.csv", headers, rows, also_cold=also_cold)
 
 
 def _runlog_text(run: dict) -> str:
@@ -356,6 +374,119 @@ def _runlog_text(run: dict) -> str:
         f"Records Checked:     {run['records_checked']:,}\n"
         f"Total Rows Written:  {run['total_rows_written']:,}\n"
     )
+
+
+# ---------------------------------------------------------------------------
+# Non-pass audit zip
+# ---------------------------------------------------------------------------
+
+_NONPASS_SQL = """
+    -- Person name pairs that did not reach address gating
+    SELECT
+        mi.contact_id  AS InputContactID,
+        mi.entity_id   AS InputOrgID,
+        nm.SDN_UID     AS SDNID,
+        CAST(NULL AS INT) AS SDNaKaID,
+        LTRIM(RTRIM(ISNULL(mi.first_name + ' ', '') + ISNULL(mi.last_name, ''))) AS InputName,
+        LTRIM(RTRIM(ISNULL(se.firstName + ' ', '') + ISNULL(se.lastName, ''))) AS SDNName,
+        'Regular'      AS SDNNameType
+    FROM [{s}].[MatchingResults_Person_NoMatch] nm
+    JOIN [{s}].[MatchingInput_v2] mi ON mi.input_id = nm.Input_Record_ID
+    JOIN [{sdn}].[dbo].[sdnEntry]  se ON se.uid     = nm.SDN_UID
+    WHERE nm.Run_ID = ?
+
+    UNION ALL
+
+    -- Individual AKA pairs that did not reach address gating
+    SELECT
+        mi.contact_id,
+        mi.entity_id,
+        nm.SDN_UID,
+        CAST(NULL AS INT),
+        LTRIM(RTRIM(ISNULL(mi.first_name + ' ', '') + ISNULL(mi.last_name, ''))),
+        LTRIM(RTRIM(ISNULL(nm.AKA_First_Name + ' ', '') + ISNULL(nm.AKA_Last_Name, ''))),
+        'AKA'
+    FROM [{s}].[MatchingResults_AKA_NoMatch] nm
+    JOIN [{s}].[MatchingInput_v2] mi ON mi.input_id = nm.Input_Record_ID
+    WHERE nm.Run_ID = ?
+
+    UNION ALL
+
+    -- Org name pairs that did not reach address gating
+    SELECT
+        mi.contact_id,
+        mi.entity_id,
+        nm.SDN_UID,
+        CAST(NULL AS INT),
+        mi.entity_name,
+        ISNULL(se.lastName, ''),
+        'Regular'
+    FROM [{s}].[MatchingResults_OrgName_NoMatch] nm
+    JOIN [{s}].[MatchingInput_v2] mi ON mi.input_id = nm.Input_Record_ID
+    JOIN [{sdn}].[dbo].[sdnEntry]  se ON se.uid     = nm.SDN_UID
+    WHERE nm.Run_ID = ?
+
+    UNION ALL
+
+    -- Org AKA name pairs that did not reach address gating
+    SELECT
+        mi.contact_id,
+        mi.entity_id,
+        nm.SDN_UID,
+        nm.AKA_UID,
+        mi.entity_name,
+        ISNULL(nm.SDNOrgName, ''),
+        'AKA'
+    FROM [{s}].[MatchingResults_OrgName_AKA_NoMatch] nm
+    JOIN [{s}].[MatchingInput_v2] mi ON mi.input_id = nm.Input_Record_ID
+    WHERE nm.Run_ID = ?
+"""
+
+_NONPASS_HEADERS = [
+    'InputContactID', 'InputOrgID', 'SDNID', 'SDNaKaID',
+    'InputName', 'SDNName', 'SDNNameType', 'SDNDate', 'RunDate',
+]
+
+
+def _write_nonpass_zip(conn, sdn_db: str, schema: str,
+                       run_id: int, run: dict, output) -> None:
+    """Build the non-pass audit CSV, zip it, and upload to Cold tier."""
+    sdn_date = run['sdn_publish_date']
+    run_date = run['run_date']
+    sdn_date_str = (sdn_date.strftime('%Y-%m-%d')
+                    if hasattr(sdn_date, 'strftime') else str(sdn_date or ''))
+    run_date_str = (run_date.strftime('%Y-%m-%d %H:%M:%S')
+                    if hasattr(run_date, 'strftime') else str(run_date or ''))
+
+    sql = _NONPASS_SQL.replace('{s}', schema).replace('{sdn}', sdn_db)
+    rows = conn.cursor().execute(sql, [run_id] * 4).fetchall()
+
+    # Build CSV with the required header block
+    buf = io.StringIO()
+    buf.write(f"Reason for not Including as a match: InsufficientNameMatch\n")
+    buf.write(f"Run Date: {run_date_str}\n")
+    buf.write(f"SDN List Version: {sdn_date_str}\n")
+    buf.write("\n")
+    w = csv.writer(buf)
+    w.writerow(_NONPASS_HEADERS)
+    for row in rows:
+        w.writerow([row[0], row[1], row[2], row[3],
+                    row[4], row[5], row[6],
+                    sdn_date_str, run_date_str])
+
+    csv_bytes = buf.getvalue().encode('utf-8')
+
+    # Zip
+    ts       = datetime.now()
+    stamp    = ts.strftime('%Y%m%d%H%M%S%f')[:16]   # YYYYMMDDHHMMSSCC
+    zip_name = f"audit-nonpass-{stamp}.zip"
+    csv_name = f"audit-nonpass-{stamp}.csv"
+    zip_buf  = io.BytesIO()
+    with zipfile.ZipFile(zip_buf, 'w', zipfile.ZIP_DEFLATED) as zf:
+        zf.writestr(csv_name, csv_bytes)
+
+    output.write_cold(zip_name, zip_buf.getvalue())
+    print(f"    {len(rows):,} non-pass pairs written.")
 
 
 # ---------------------------------------------------------------------------
@@ -383,13 +514,13 @@ def main():
 
     ap.add_argument('--storage-container', default='sdn', metavar='CONTAINER',
                     help='Blob container name (default: sdn)')
+    ap.add_argument('--sdn-server',   default=None, metavar='SERVER',
+                    help='SDN source database server FQDN '
+                         '(default: same as --out-server); required for non-pass audit')
+    ap.add_argument('--sdn-database', default='SDN', metavar='DATABASE',
+                    help='SDN source database name (default: SDN)')
 
     bkp = ap.add_argument_group('backup (optional, on-premise SQL Server only)')
-    bkp.add_argument('--sdn-server',       default=None, metavar='SERVER',
-                     help='SQL Server hosting the SDN database '
-                          '(default: same as --out-server)')
-    bkp.add_argument('--sdn-database',     default='SDN', metavar='DATABASE',
-                     help='SDN database name (default: SDN)')
     bkp.add_argument('--backup-path',      default=None, metavar='PATH',
                      help='Local folder to write .bak files '
                           '(e.g. C:\\backups)')
@@ -448,13 +579,17 @@ def main():
 
         print("\nExporting tables...")
         for table in EXPORT_TABLES:
-            order = 'Input_Record_ID, Match_Type' if table == 'MatchingResults_Report' else None
-            _export_table(conn, s, table, run_id, output, order_by=order)
+            order      = 'Input_Record_ID, Match_Type' if table == 'MatchingResults_Report' else None
+            also_cold  = args.output_blob and (table in COLD_COPY_TABLES)
+            _export_table(conn, s, table, run_id, output,
+                          order_by=order, also_cold=also_cold)
 
         print("\nWriting run log...")
         output.write_text('MatchingResults_RunLog.txt', _runlog_text(run))
 
         if args.output_blob:
+            print("\nWriting non-pass audit zip (Cold tier)...")
+            _write_nonpass_zip(conn, args.sdn_database, s, run_id, run, output)
             print("\nArchiving SDN.XML...")
             output.copy_sdn_xml(args.storage_container)
 
