@@ -2492,35 +2492,35 @@ CREATE TABLE [{s}].[ScoringWeights] (
 """
 
 _SCORING_WEIGHTS_SEED = [
-    # ---- Name Similarity (0-60) ------------------------------------------
-    ('NameSimilarity_Max',          60,  'Maximum points for name similarity category'),
-    ('TokenMatch_All',              20,  'Org: all tokens match (order-irrelevant)'),
-    ('TokenMatch_FirstLast_Min',    16,  'Org: first+last+core tokens match — lower bound'),
-    ('TokenMatch_FirstLast_Max',    18,  'Org: first+last+core tokens match — upper bound'),
-    ('TokenMatch_Majority_Min',     10,  'Org: majority of tokens match — lower bound'),
-    ('TokenMatch_Majority_Max',     15,  'Org: majority of tokens match — upper bound'),
-    ('TokenMatch_Minority_Min',      5,  'Org: minority of tokens match — lower bound'),
-    ('TokenMatch_Minority_Max',      9,  'Org: minority of tokens match — upper bound'),
-    ('FuzzyMatch_Max',              40,  'Org: full-string JW component maximum'),
-    # ---- Name Context (0-5) ----------------------------------------------
-    ('NameContext_Primary',          5,  'Match on primary SDN name'),
-    ('NameContext_StrongAKA',        4,  'Match on strong AKA name'),
-    ('NameContext_WeakAKA',          2,  'Match on weak AKA name'),
-    # ---- Entity Type (0 or 10) -------------------------------------------
-    ('EntityType_Match',            10,  'Points when input type == SDN type (Individual/Entity)'),
+    # ---- Name Similarity (0-45) ------------------------------------------
+    ('NameSimilarity_Max',          45,   'Maximum points for name similarity category'),
+    ('TokenMatch_All',              15,   'Org: all tokens match (order-irrelevant)'),
+    ('TokenMatch_FirstLast_Min',    12,   'Org: first+last+core tokens match — lower bound'),
+    ('TokenMatch_FirstLast_Max',    13.5, 'Org: first+last+core tokens match — upper bound'),
+    ('TokenMatch_Majority_Min',      7.5, 'Org: majority of tokens match — lower bound'),
+    ('TokenMatch_Majority_Max',     11.25,'Org: majority of tokens match — upper bound'),
+    ('TokenMatch_Minority_Min',      3.75,'Org: minority of tokens match — lower bound'),
+    ('TokenMatch_Minority_Max',      6.75,'Org: minority of tokens match — upper bound'),
+    ('FuzzyMatch_Max',              30,   'Org: full-string JW component maximum'),
+    # ---- Name Context (0-15) ---------------------------------------------
+    ('NameContext_Primary',         15,   'Match on primary SDN name'),
+    ('NameContext_StrongAKA',       12,   'Match on strong AKA name'),
+    ('NameContext_WeakAKA',          6,   'Match on weak AKA name'),
+    # ---- Entity Type (0 or 15) -------------------------------------------
+    ('EntityType_Match',            15,   'Points when input type == SDN type (Individual/Entity)'),
     # ---- Address (0-15) --------------------------------------------------
-    ('Address_Full',                15,  'Full address JW >= threshold'),
-    ('Address_CityCountry_Min',     10,  'City+Country JW at threshold — lower bound'),
-    ('Address_CityCountry_Max',     12,  'City+Country JW = 100 — upper bound'),
-    ('Address_RegionCountry_Min',    6,  'Region+Country JW at threshold — lower bound'),
-    ('Address_RegionCountry_Max',    9,  'Region+Country JW = 100 — upper bound'),
-    ('Address_Country_Min',          3,  'Country JW at threshold — lower bound'),
-    ('Address_Country_Max',          5,  'Country JW = 100 — upper bound'),
-    ('Address_JW_Threshold',        85,  'Minimum JW % to qualify for any address tier'),
-    # ---- Country (0-10) --------------------------------------------------
-    ('Country_Full',                10,  'Country JW = 100 (exact match)'),
+    ('Address_Full',                15,   'Full address JW >= threshold'),
+    ('Address_CityCountry_Min',     10,   'City+Country JW at threshold — lower bound'),
+    ('Address_CityCountry_Max',     12,   'City+Country JW = 100 — upper bound'),
+    ('Address_RegionCountry_Min',    6,   'Region+Country JW at threshold — lower bound'),
+    ('Address_RegionCountry_Max',    9,   'Region+Country JW = 100 — upper bound'),
+    ('Address_Country_Min',          3,   'Country JW at threshold — lower bound'),
+    ('Address_Country_Max',          5,   'Country JW = 100 — upper bound'),
+    ('Address_JW_Threshold',        85,   'Minimum JW % to qualify for any address tier'),
+    # ---- Country/Jurisdiction (0-10) -------------------------------------
+    ('Country_Full',                10,   'Country JW = 100 (exact match)'),
     # ---- Internal thresholds ---------------------------------------------
-    ('WordMatch_JW_Threshold',      75,  'JW % threshold for word-level token matching'),
+    ('WordMatch_JW_Threshold',      75,   'JW % threshold for word-level token matching'),
 ]
 
 

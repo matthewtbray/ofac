@@ -66,22 +66,22 @@ def _conn_str(server: str, database: str) -> str:
 # ---------------------------------------------------------------------------
 
 _WEIGHT_DEFAULTS: dict = {
-    # Name Similarity (0-60)
-    'NameSimilarity_Max':        60.0,
-    'TokenMatch_All':            20.0,
-    'TokenMatch_FirstLast_Min':  16.0,
-    'TokenMatch_FirstLast_Max':  18.0,
-    'TokenMatch_Majority_Min':   10.0,
-    'TokenMatch_Majority_Max':   15.0,
-    'TokenMatch_Minority_Min':    5.0,
-    'TokenMatch_Minority_Max':    9.0,
-    'FuzzyMatch_Max':            40.0,
-    # Name Context (0-5)
-    'NameContext_Primary':        5.0,
-    'NameContext_StrongAKA':      4.0,
-    'NameContext_WeakAKA':        2.0,
-    # Entity Type (0 or 10)
-    'EntityType_Match':          10.0,
+    # Name Similarity (0-45)
+    'NameSimilarity_Max':        45.0,
+    'TokenMatch_All':            15.0,
+    'TokenMatch_FirstLast_Min':  12.0,
+    'TokenMatch_FirstLast_Max':  13.5,
+    'TokenMatch_Majority_Min':    7.5,
+    'TokenMatch_Majority_Max':   11.25,
+    'TokenMatch_Minority_Min':    3.75,
+    'TokenMatch_Minority_Max':    6.75,
+    'FuzzyMatch_Max':            30.0,
+    # Name Context (0-15)
+    'NameContext_Primary':       15.0,
+    'NameContext_StrongAKA':     12.0,
+    'NameContext_WeakAKA':        6.0,
+    # Entity Type (0 or 15)
+    'EntityType_Match':          15.0,
     # Address (0-15)
     'Address_Full':              15.0,
     'Address_CityCountry_Min':   10.0,
@@ -91,7 +91,7 @@ _WEIGHT_DEFAULTS: dict = {
     'Address_Country_Min':        3.0,
     'Address_Country_Max':        5.0,
     'Address_JW_Threshold':      85.0,
-    # Country (0-10)
+    # Country/Jurisdiction (0-10)
     'Country_Full':              10.0,
     # Internal
     'WordMatch_JW_Threshold':    75.0,
