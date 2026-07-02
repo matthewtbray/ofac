@@ -1348,16 +1348,20 @@ def setup_output_tables(conn, schema: str, drop: bool):
                     'MatchingResults_Person_NoMatch', 'MatchingResults_Person_Full'):
             cur.execute(f"IF OBJECT_ID(N'[{schema}].[{tbl}]', N'U') IS NOT NULL "
                         f"DROP TABLE [{schema}].[{tbl}];")
-    # Full-match result tables
+    # Full-match result tables + their NoMatch counterparts
     cur.execute(_DDL_FULL.replace('{s}', schema))
+    cur.execute(_DDL_NO_MATCH.replace('{s}', schema))
     cur.execute(_DDL_AKA.replace('{s}', schema))
+    cur.execute(_DDL_AKA_NO_MATCH.replace('{s}', schema))
     cur.execute(_DDL_ORG.replace('{s}', schema))
     cur.execute(_DDL_ORG_AKA.replace('{s}', schema))
-    # Address tables: lookup first (no FK dependency), then results table
+    # Address tables: lookup first (no FK dependency), then results + NoMatch
     cur.execute(_DDL_ADDR_MATCH_TYPE.replace('{s}', schema))
     cur.execute(_DDL_ADDR_FULL.replace('{s}', schema))
+    cur.execute(_DDL_ADDR_NO_MATCH.replace('{s}', schema))
     # Remarks-derived tables
     cur.execute(_DDL_LINKED_TO.replace('{s}', schema))
+    cur.execute(_DDL_LINKED_TO_NO_MATCH.replace('{s}', schema))
     cur.execute(_DDL_PHONE.replace('{s}', schema))
     # No-match log (one row per unmatched input record)
     cur.execute(_DDL_NO_MATCH_LOG.replace('{s}', schema))
