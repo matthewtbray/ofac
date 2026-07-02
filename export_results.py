@@ -380,24 +380,27 @@ def _runlog_text(run: dict) -> str:
 # Non-pass audit zip
 # ---------------------------------------------------------------------------
 
+# Cross-database queries are not supported on Azure SQL Database.
+# SDN names for Person_NoMatch and OrgName_NoMatch rows are resolved via a
+# Python dict loaded from a separate connection to the SDN database.
+# NULL in the SDNName position signals that a dict lookup is needed.
 _NONPASS_SQL = """
-    -- Person name pairs that did not reach address gating
+    -- Person name pairs: no SDN name stored — resolved in Python
     SELECT
-        mi.contact_id  AS InputContactID,
-        mi.entity_id   AS InputOrgID,
-        nm.SDN_UID     AS SDNID,
-        CAST(NULL AS INT) AS SDNaKaID,
+        mi.contact_id           AS InputContactID,
+        mi.entity_id            AS InputOrgID,
+        nm.SDN_UID              AS SDNID,
+        CAST(NULL AS INT)       AS SDNaKaID,
         LTRIM(RTRIM(ISNULL(mi.first_name + ' ', '') + ISNULL(mi.last_name, ''))) AS InputName,
-        LTRIM(RTRIM(ISNULL(se.firstName + ' ', '') + ISNULL(se.lastName, ''))) AS SDNName,
-        'Regular'      AS SDNNameType
+        CAST(NULL AS NVARCHAR(900)) AS SDNName,
+        'Regular'               AS SDNNameType
     FROM [{s}].[MatchingResults_Person_NoMatch] nm
     JOIN [{s}].[MatchingInput_v2] mi ON mi.input_id = nm.Input_Record_ID
-    JOIN [{sdn}].[dbo].[sdnEntry]  se ON se.uid     = nm.SDN_UID
     WHERE nm.Run_ID = ?
 
     UNION ALL
 
-    -- Individual AKA pairs that did not reach address gating
+    -- Individual AKA pairs: SDN name stored in table
     SELECT
         mi.contact_id,
         mi.entity_id,
@@ -412,23 +415,22 @@ _NONPASS_SQL = """
 
     UNION ALL
 
-    -- Org name pairs that did not reach address gating
+    -- Org name pairs: no SDN name stored — resolved in Python
     SELECT
         mi.contact_id,
         mi.entity_id,
         nm.SDN_UID,
         CAST(NULL AS INT),
         mi.entity_name,
-        ISNULL(se.lastName, ''),
+        CAST(NULL AS NVARCHAR(900)),
         'Regular'
     FROM [{s}].[MatchingResults_OrgName_NoMatch] nm
     JOIN [{s}].[MatchingInput_v2] mi ON mi.input_id = nm.Input_Record_ID
-    JOIN [{sdn}].[dbo].[sdnEntry]  se ON se.uid     = nm.SDN_UID
     WHERE nm.Run_ID = ?
 
     UNION ALL
 
-    -- Org AKA name pairs that did not reach address gating
+    -- Org AKA pairs: SDN name stored in table
     SELECT
         mi.contact_id,
         mi.entity_id,
@@ -448,7 +450,7 @@ _NONPASS_HEADERS = [
 ]
 
 
-def _write_nonpass_zip(conn, sdn_db: str, schema: str,
+def _write_nonpass_zip(out_conn, sdn_server: str, sdn_db: str, schema: str,
                        run_id: int, run: dict, output) -> None:
     """Build the non-pass audit CSV, zip it, and upload to Cold tier."""
     sdn_date = run['sdn_publish_date']
@@ -458,8 +460,19 @@ def _write_nonpass_zip(conn, sdn_db: str, schema: str,
     run_date_str = (run_date.strftime('%Y-%m-%d %H:%M:%S')
                     if hasattr(run_date, 'strftime') else str(run_date or ''))
 
-    sql = _NONPASS_SQL.replace('{s}', schema).replace('{sdn}', sdn_db)
-    rows = conn.cursor().execute(sql, [run_id] * 4).fetchall()
+    # Load SDN entry names into a dict to avoid cross-DB joins (not supported
+    # on Azure SQL Database).  NULL SDNName in the union query signals lookup needed.
+    print("  Loading SDN entry names for audit lookup...")
+    sdn_names: dict = {}
+    with pyodbc.connect(_build_conn_str(sdn_server, sdn_db)) as sdn_conn:
+        for uid, fn, ln in sdn_conn.cursor().execute(
+                "SELECT uid, firstName, lastName FROM dbo.sdnEntry"):
+            fn = (fn or '').strip()
+            ln = (ln or '').strip()
+            sdn_names[uid] = ((fn + ' ' + ln).strip() if fn else ln)
+
+    sql  = _NONPASS_SQL.replace('{s}', schema)
+    rows = out_conn.cursor().execute(sql, [run_id] * 4).fetchall()
 
     # Build CSV with the required header block
     buf = io.StringIO()
@@ -470,8 +483,9 @@ def _write_nonpass_zip(conn, sdn_db: str, schema: str,
     w = csv.writer(buf)
     w.writerow(_NONPASS_HEADERS)
     for row in rows:
+        sdn_name = row[5] if row[5] is not None else sdn_names.get(row[2], '')
         w.writerow([row[0], row[1], row[2], row[3],
-                    row[4], row[5], row[6],
+                    row[4], sdn_name, row[6],
                     sdn_date_str, run_date_str])
 
     csv_bytes = buf.getvalue().encode('utf-8')
@@ -589,7 +603,8 @@ def main():
 
         if args.output_blob:
             print("\nWriting non-pass audit zip (Cold tier)...")
-            _write_nonpass_zip(conn, args.sdn_database, s, run_id, run, output)
+            _write_nonpass_zip(conn, args.sdn_server, args.sdn_database,
+                               s, run_id, run, output)
             print("\nArchiving SDN.XML...")
             output.copy_sdn_xml(args.storage_container)
 
