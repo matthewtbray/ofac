@@ -272,7 +272,8 @@ class LocalOutput:
         os.makedirs(self.folder_path, exist_ok=True)
         print(f"Output folder: {self.folder_path}")
 
-    def write_csv(self, filename: str, headers: list, rows: list):
+    def write_csv(self, filename: str, headers: list, rows: list,
+                  also_cold: bool = False):
         path = os.path.join(self.folder_path, filename)
         with open(path, 'w', newline='', encoding='utf-8') as f:
             csv.writer(f).writerow(headers)
@@ -380,70 +381,6 @@ def _runlog_text(run: dict) -> str:
 # Non-pass audit zip
 # ---------------------------------------------------------------------------
 
-# Cross-database queries are not supported on Azure SQL Database.
-# SDN names for Person_NoMatch and OrgName_NoMatch rows are resolved via a
-# Python dict loaded from a separate connection to the SDN database.
-# NULL in the SDNName position signals that a dict lookup is needed.
-_NONPASS_SQL = """
-    -- Person name pairs: no SDN name stored — resolved in Python
-    SELECT
-        mi.contact_id           AS InputContactID,
-        mi.entity_id            AS InputOrgID,
-        nm.SDN_UID              AS SDNID,
-        CAST(NULL AS INT)       AS SDNaKaID,
-        LTRIM(RTRIM(ISNULL(mi.first_name + ' ', '') + ISNULL(mi.last_name, ''))) AS InputName,
-        CAST(NULL AS NVARCHAR(900)) AS SDNName,
-        'Regular'               AS SDNNameType
-    FROM [{s}].[MatchingResults_Person_NoMatch] nm
-    JOIN [{s}].[MatchingInput_v2] mi ON mi.input_id = nm.Input_Record_ID
-    WHERE nm.Run_ID = ?
-
-    UNION ALL
-
-    -- Individual AKA pairs: SDN name stored in table
-    SELECT
-        mi.contact_id,
-        mi.entity_id,
-        nm.SDN_UID,
-        CAST(NULL AS INT),
-        LTRIM(RTRIM(ISNULL(mi.first_name + ' ', '') + ISNULL(mi.last_name, ''))),
-        LTRIM(RTRIM(ISNULL(nm.AKA_First_Name + ' ', '') + ISNULL(nm.AKA_Last_Name, ''))),
-        'AKA'
-    FROM [{s}].[MatchingResults_AKA_NoMatch] nm
-    JOIN [{s}].[MatchingInput_v2] mi ON mi.input_id = nm.Input_Record_ID
-    WHERE nm.Run_ID = ?
-
-    UNION ALL
-
-    -- Org name pairs: no SDN name stored — resolved in Python
-    SELECT
-        mi.contact_id,
-        mi.entity_id,
-        nm.SDN_UID,
-        CAST(NULL AS INT),
-        mi.entity_name,
-        CAST(NULL AS NVARCHAR(900)),
-        'Regular'
-    FROM [{s}].[MatchingResults_OrgName_NoMatch] nm
-    JOIN [{s}].[MatchingInput_v2] mi ON mi.input_id = nm.Input_Record_ID
-    WHERE nm.Run_ID = ?
-
-    UNION ALL
-
-    -- Org AKA pairs: SDN name stored in table
-    SELECT
-        mi.contact_id,
-        mi.entity_id,
-        nm.SDN_UID,
-        nm.AKA_UID,
-        mi.entity_name,
-        ISNULL(nm.SDNOrgName, ''),
-        'AKA'
-    FROM [{s}].[MatchingResults_OrgName_AKA_NoMatch] nm
-    JOIN [{s}].[MatchingInput_v2] mi ON mi.input_id = nm.Input_Record_ID
-    WHERE nm.Run_ID = ?
-"""
-
 _NONPASS_HEADERS = [
     'InputContactID', 'InputOrgID', 'SDNID', 'SDNaKaID',
     'InputName', 'SDNName', 'SDNNameType', 'SDNDate', 'RunDate',
@@ -452,45 +389,105 @@ _NONPASS_HEADERS = [
 
 def _write_nonpass_zip(out_conn, sdn_server: str, sdn_db: str, schema: str,
                        run_id: int, run: dict, output) -> None:
-    """Build the non-pass audit CSV, zip it, and upload to Cold tier."""
-    sdn_date = run['sdn_publish_date']
-    run_date = run['run_date']
+    """Non-pass audit: every input × matching-type SDN name that did not reach
+    address gating.  Individual inputs are crossed against all SDN Individual
+    names (primary + AKA); Entity inputs against all SDN Entity names."""
+    sdn_date     = run['sdn_publish_date']
+    run_date     = run['run_date']
     sdn_date_str = (sdn_date.strftime('%Y-%m-%d')
                     if hasattr(sdn_date, 'strftime') else str(sdn_date or ''))
     run_date_str = (run_date.strftime('%Y-%m-%d %H:%M:%S')
                     if hasattr(run_date, 'strftime') else str(run_date or ''))
 
-    # Load SDN entry names into a dict to avoid cross-DB joins (not supported
-    # on Azure SQL Database).  NULL SDNName in the union query signals lookup needed.
-    print("  Loading SDN entry names for audit lookup...")
-    sdn_names: dict = {}
+    # ---- Load SDN names by entity type from SDN DB -------------------------
+    print("  Loading SDN names for non-pass audit...")
+    person_names     = {}   # {uid: display_name}
+    entity_names     = {}   # {uid: display_name}
+    person_aka_names = {}   # {(sdn_uid, aka_uid): display_name}
+    entity_aka_names = {}   # {(sdn_uid, aka_uid): display_name}
+
     with pyodbc.connect(_build_conn_str(sdn_server, sdn_db)) as sdn_conn:
-        for uid, fn, ln in sdn_conn.cursor().execute(
-                "SELECT uid, firstName, lastName FROM dbo.sdnEntry"):
+        for uid, fn, ln, sdt in sdn_conn.cursor().execute(
+                "SELECT uid, firstName, lastName, sdnType FROM dbo.sdnEntry"):
             fn = (fn or '').strip()
             ln = (ln or '').strip()
-            sdn_names[uid] = ((fn + ' ' + ln).strip() if fn else ln)
+            nm = ((fn + ' ' + ln).strip() if fn else ln)
+            if sdt == 'Individual':
+                person_names[uid] = nm
+            else:
+                entity_names[uid] = nm
 
-    sql  = _NONPASS_SQL.replace('{s}', schema)
-    rows = out_conn.cursor().execute(sql, [run_id] * 4).fetchall()
+        for sdn_uid, aka_uid, fn, ln, sdt in sdn_conn.cursor().execute("""
+                SELECT e.uid, a.uid, a.firstName, a.lastName, e.sdnType
+                FROM   dbo.akaList a
+                JOIN   dbo.sdnEntry_akaList ea ON ea.akaList_uid  = a.uid
+                JOIN   dbo.sdnEntry e          ON e.uid           = ea.sdnEntry_uid"""):
+            fn = (fn or '').strip()
+            ln = (ln or '').strip()
+            nm = ((fn + ' ' + ln).strip() if fn else ln)
+            if sdt == 'Individual':
+                person_aka_names[(sdn_uid, aka_uid)] = nm
+            else:
+                entity_aka_names[(sdn_uid, aka_uid)] = nm
 
-    # Build CSV with the required header block
+    print(f"    {len(person_names):,} SDN individuals  "
+          f"{len(person_aka_names):,} individual AKAs  "
+          f"{len(entity_names):,} SDN entities  "
+          f"{len(entity_aka_names):,} entity AKAs")
+
+    # ---- Gate-passing name pairs for this run (deduplicated) ---------------
+    # GatePassing has one row per name × address combination; we only need the
+    # distinct (input_id, sdn_uid, aka_uid) triples to exclude from the report.
+    gate_pass: set = set()
+    for inp_id, sdn_uid, aka_uid in out_conn.cursor().execute(
+            f"SELECT DISTINCT Input_Record_ID, SDN_UID, SDN_AKA_UID "
+            f"FROM [{schema}].[MatchingResults_GatePassing] WHERE Run_ID = ?",
+            run_id):
+        gate_pass.add((inp_id, sdn_uid, aka_uid))
+    print(f"    {len(gate_pass):,} gate-passing name pairs excluded")
+
+    # ---- Input records for this run ----------------------------------------
+    input_rows = out_conn.cursor().execute(
+        f"SELECT input_id, entity_type, "
+        f"COALESCE(entity_name, "
+        f"LTRIM(RTRIM(ISNULL(first_name+' ','')+ISNULL(last_name,'')))) AS display_nm, "
+        f"contact_id, entity_id "
+        f"FROM [{schema}].[MatchingInput_v2] WHERE Run_ID = ?",
+        run_id,
+    ).fetchall()
+
+    # ---- Build CSV ----------------------------------------------------------
     buf = io.StringIO()
-    buf.write(f"Reason for not Including as a match: InsufficientNameMatch\n")
+    buf.write("Reason for not Including as a match: InsufficientNameMatch\n")
     buf.write(f"Run Date: {run_date_str}\n")
     buf.write(f"SDN List Version: {sdn_date_str}\n")
     buf.write("\n")
     w = csv.writer(buf)
     w.writerow(_NONPASS_HEADERS)
-    for row in rows:
-        sdn_name = row[5] if row[5] is not None else sdn_names.get(row[2], '')
-        w.writerow([row[0], row[1], row[2], row[3],
-                    row[4], sdn_name, row[6],
-                    sdn_date_str, run_date_str])
+
+    total = 0
+    for inp_id, ent_type, inp_name, contact_id, entity_id in input_rows:
+        is_person   = (ent_type or '').strip() == 'Individual'
+        primary_map = person_names     if is_person else entity_names
+        aka_map     = person_aka_names if is_person else entity_aka_names
+
+        for sdn_uid, sdn_name in primary_map.items():
+            if (inp_id, sdn_uid, None) not in gate_pass:
+                w.writerow([contact_id, entity_id, sdn_uid, None,
+                            inp_name, sdn_name, 'Regular',
+                            sdn_date_str, run_date_str])
+                total += 1
+
+        for (sdn_uid, aka_uid), sdn_name in aka_map.items():
+            if (inp_id, sdn_uid, aka_uid) not in gate_pass:
+                w.writerow([contact_id, entity_id, sdn_uid, aka_uid,
+                            inp_name, sdn_name, 'AKA',
+                            sdn_date_str, run_date_str])
+                total += 1
 
     csv_bytes = buf.getvalue().encode('utf-8')
 
-    # Zip
+    # ---- Zip and upload to Cold tier ---------------------------------------
     ts       = datetime.now()
     stamp    = ts.strftime('%Y%m%d%H%M%S%f')[:16]   # YYYYMMDDHHMMSSCC
     zip_name = f"audit-nonpass-{stamp}.zip"
@@ -500,7 +497,7 @@ def _write_nonpass_zip(out_conn, sdn_server: str, sdn_db: str, schema: str,
         zf.writestr(csv_name, csv_bytes)
 
     output.write_cold(zip_name, zip_buf.getvalue())
-    print(f"    {len(rows):,} non-pass pairs written.")
+    print(f"    {total:,} non-pass pairs written → {zip_name}")
 
 
 # ---------------------------------------------------------------------------

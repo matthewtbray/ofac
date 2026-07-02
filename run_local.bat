@@ -12,7 +12,7 @@ REM    4. Export results, back up databases, truncate, shrink
 REM =====================================================================
 
 REM ---- Configuration --------------------------------------------------
-SET PYTHON=python
+SET PYTHON=python3
 SET SCRIPTS=C:\pythonscripts
 SET SDN_XML=C:\sdn_data\sdn.xml
 SET OUTPUT_PATH=C:\sdn_output
@@ -28,7 +28,7 @@ SET SQL_USER=
 SET SQL_PASSWORD=
 
 REM  Number of SDN entries to evaluate: a number (e.g. 500) or ALL
-SET SDN_LIMIT=600
+SET SDN_LIMIT=ALL
 
 
 REM =====================================================================
@@ -39,7 +39,7 @@ ECHO ====================================================================
 
 REM ---- Step 1: Download SDN.XML from OFAC ----------------------------
 ECHO.
-ECHO [1/4] Downloading SDN.XML from OFAC...
+ECHO [1/5] Downloading SDN.XML from OFAC...
 IF NOT EXIST "C:\sdn_data" MKDIR "C:\sdn_data"
 curl -L --silent --show-error --output "%SDN_XML%" ^
     "https://sanctionslistservice.ofac.treas.gov/api/PublicationPreview/exports/SDN.XML"
@@ -52,7 +52,7 @@ ECHO   Saved: %SDN_XML%
 
 REM ---- Step 2: Import SDN.XML into SQL Server ------------------------
 ECHO.
-ECHO [2/4] Importing SDN.XML into [%SDN_SERVER%].[%SDN_DB%]...
+ECHO [2/5] Importing SDN.XML into [%SDN_SERVER%].[%SDN_DB%]...
 %PYTHON% "%SCRIPTS%\xml_import.py" ^
     --xml      "%SDN_XML%" ^
     --server   "%SDN_SERVER%" ^
@@ -65,7 +65,7 @@ IF %ERRORLEVEL% NEQ 0 (
 
 REM ---- Step 3: Run SDN matching --------------------------------------
 ECHO.
-ECHO [3/4] Running SDN matching...
+ECHO [3/5] Running SDN matching...
 %PYTHON% "%SCRIPTS%\sdn_match_v2.py" ^
     --input-screening ^
     --sdn-server "%SDN_SERVER%" --sdn-database "%SDN_DB%" ^
@@ -77,9 +77,21 @@ IF %ERRORLEVEL% NEQ 0 (
     GOTO :FAIL
 )
 
-REM ---- Step 4: Export, back up, truncate, shrink --------------------
+REM ---- Step 4: Score gate-passing rows --------------------------------
 ECHO.
-ECHO [4/4] Exporting results / backing up / truncating / shrinking...
+ECHO [4/5] Scoring gate-passing rows (100-pt composite)...
+%PYTHON% "%SCRIPTS%\score_gate_passing.py" ^
+    --last-run ^
+    --out-server    "%OUT_SERVER%"  --out-database "%OUT_DB%" ^
+    --sdn-server    "%SDN_SERVER%" --sdn-database "%SDN_DB%"
+IF %ERRORLEVEL% NEQ 0 (
+    ECHO ERROR: score_gate_passing.py failed.
+    GOTO :FAIL
+)
+
+REM ---- Step 5: Export, back up, truncate, shrink ----------------------
+ECHO.
+ECHO [5/5] Exporting results / backing up / truncating / shrinking...
 %PYTHON% "%SCRIPTS%\export_results.py" ^
     --out-server    "%OUT_SERVER%"  --out-database "%OUT_DB%" ^
     --sdn-server    "%SDN_SERVER%" --sdn-database "%SDN_DB%" ^
